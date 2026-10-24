@@ -11,8 +11,10 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import tempfile
+import textwrap
 import urllib.request
 from dataclasses import dataclass
 
@@ -47,9 +49,18 @@ ALIASES = {"decky": "decky-loader", "brave": "brave-debloated", "chatgpt": "chat
            "google-chrome": "chrome", "telegram-desktop": "telegram", "1pass": "1password"}
 
 
+HELP_WIDTH = 78
+
+
 def help_lines() -> str:
-    """The 'Optional apps' lines of `tapkich help`, made from APPS."""
-    return "\n".join(f"  tapkich install {a.name:<17} {a.desc}" for a in APPS)
+    """The 'Optional apps' lines of `tapkich help`, made from APPS, wrapped to HELP_WIDTH columns."""
+    out = []
+    for a in APPS:
+        head = f"  tapkich install {a.name:<17} "
+        lines = textwrap.wrap(a.desc, HELP_WIDTH - len(head)) or [""]
+        out.append(head + lines[0])
+        out += [" " * len(head) + line for line in lines[1:]]
+    return "\n".join(out)
 
 
 # ---- Brave: our own managed policy (not the brave-debloater package) -----------------------------------------------
@@ -189,10 +200,13 @@ def is_installed(pkg: str, run=subprocess.run) -> bool:
     return run(["pacman", "-Q", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
-def _install_package(app: App, run, out) -> int:
+def _install_package(app: App, run, out, which=shutil.which) -> int:
     if is_installed(app.package, run):
         out(f"{app.name} is already installed.")
         return 0
+    if app.source == "aur" and not which("paru"):
+        out("paru (the AUR helper) is not installed. It comes from the TapkicH-OS repository: sudo pacman -S paru")
+        return 1
     if app.note:
         out(app.note)
     cmd = (["sudo", "pacman", "-S", "--needed", app.package] if app.source == "pacman"
@@ -215,7 +229,8 @@ def usage_text() -> str:
     return "Optional apps (tapkich install <name>):\n" + help_lines()
 
 
-def install(args: list, home: str | None = None, run=subprocess.run, urlopen=urllib.request.urlopen, out=print) -> int:
+def install(args: list, home: str | None = None, run=subprocess.run, urlopen=urllib.request.urlopen, out=print,
+            euid: int | None = None, which=shutil.which) -> int:
     """`tapkich install [name]`. No name: the list. Unknown name: the list, exit 2."""
     if not args:
         out(usage_text())
@@ -226,12 +241,19 @@ def install(args: list, home: str | None = None, run=subprocess.run, urlopen=url
         out(f"tapkich install: unknown app {' '.join(args)!r}\n\n" + usage_text())
         return 2
     app = BY_NAME[args[0]]
-    if app.source == "decky":
-        return install_decky(home or os.path.expanduser("~"), run, urlopen, out=out)
-    rc = _install_package(app, run, out)
-    if rc != 0:
-        out(f"{app.name} could not be installed.")
+    if (os.geteuid() if euid is None else euid) == 0:     # paru refuses root, and Decky and ~ would be root's
+        out("tapkich install: run it as your user, it asks for sudo when needed.")
+        return 1
+    try:
+        if app.source == "decky":
+            return install_decky(home or os.path.expanduser("~"), run, urlopen, out=out)
+        rc = _install_package(app, run, out, which)
+        if rc != 0:
+            out(f"{app.name} could not be installed.")
+            return rc
+        if app.name == "brave-debloated":             # also when Brave was there already: the policy is ours to keep
+            rc = install_brave_policy(run, out)
         return rc
-    if app.name == "brave-debloated":                 # also when Brave was there already: the policy is ours to keep
-        rc = install_brave_policy(run, out)
-    return rc
+    except OSError as e:
+        out(f"{app.name} could not be installed: {e}")
+        return 1

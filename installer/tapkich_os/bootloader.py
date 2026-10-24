@@ -16,7 +16,9 @@ USAGE = ("usage: tapkich bootloader timeout [<seconds>]\n"
          "  timeout            print the boot menu countdown\n"
          "  timeout <seconds>  set it: 0 to 60 seconds (0 = start the default entry at once, without showing the menu),\n"
          "                     or `no` to wait until you choose")
-_LINE = re.compile(r"^timeout\s*:\s*(\S*)[ \t]*$", re.M)
+_LINE = re.compile(r"^[ \t]*timeout[ \t]*:[ \t]*(\S*)[ \t]*$", re.M | re.I)
+ZERO_WARNING = ("Warning: with 0 the boot menu is not shown, so recovery and Windows cannot be reached from it.\n"
+                "To get it back, run `tapkich bootloader timeout 3` from TapkicH-OS.")
 
 
 def parse(value: str) -> str | None:
@@ -101,6 +103,8 @@ def main(args: list, boot: str = sb.BOOT, state_path: str = sb.STATE_FILE) -> in
                      "Do not restart with Secure Boot on before this is fixed (run `sudo tapkich secureboot refresh`)."))
             return 1
     print(f"Boot menu countdown: {value if value == 'no' else value + ' s'}")
+    if value == "0":
+        print(ZERO_WARNING)
     return 0
 
 

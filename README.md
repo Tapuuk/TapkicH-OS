@@ -47,7 +47,7 @@ Everything after the install goes through one command, `tapkich`.
 | `tapkich update` | Updates TapkicH-OS, system packages (pacman), AUR packages (paru) and Flatpaks |
 | `tapkich update --yes` | The same without questions |
 | `tapkich doctor` | Checks the graphics driver, Vulkan, Gaming Mode, Secure Boot, Flathub and disk space, and says what to run |
-| `tapkich gamemode` | Switches to Gaming Mode (also the gamepad button in the power menu) |
+| `tapkich gamemode` | Switches to Gaming Mode from the desktop (also the gamepad button in the power menu) |
 | `tapkich keys` | Shows your keyboard shortcuts, read from your current settings |
 | `tapkich install` | Lists the optional apps below |
 | `tapkich install <app>` | Installs one of them |
@@ -57,9 +57,10 @@ Everything after the install goes through one command, `tapkich`.
 | `tapkich restore windows` | Puts Windows back in the firmware's boot menu if it went missing |
 | `tapkich restore windows --check` | Only checks, changes nothing |
 | `tapkich restore windows --yes` | Restores without asking |
+| `tapkich restore windows --remove-stale` | Also removes leftover "Windows Boot Manager" entries whose partition is gone (asks first) |
 | `tapkich restore windows --disk /dev/xxx --part N` | Picks the Windows partition when there is more than one |
 | `tapkich bootloader timeout` | Shows how long the boot menu waits |
-| `tapkich bootloader timeout <seconds>` | Sets it, from 0 to 60 seconds |
+| `tapkich bootloader timeout <seconds>` | Sets it, from 0 to 60 seconds (0 hides the menu) |
 | `tapkich bootloader timeout no` | Makes the boot menu wait until you pick an entry |
 | `tapkich help` | Lists everything (also `tapkich -h`, `tapkich --help` or just `tapkich`) |
 

@@ -144,14 +144,17 @@ KEY_ACTIONS = [
 ]
 MODIFIER_ONLY = {"kbGoToWs", "kbMoveWinToWs", "kbGoToWsGroup", "kbMoveWinToWsGroup"}   # + the number keys
 
-_LUA_ENTRY = re.compile(r'^\s*(\w+)\s*=\s*("[^"\n]*"|\{[^}\n]*\})', re.M)
+_LUA_ENTRY = re.compile(r"""^\s*(\w+)\s*=\s*("[^"\n]*"|'[^'\n]*'|\{[^}\n]*\})""", re.M)
+_LUA_STRING = re.compile(r"""\"([^"]*)\"|'([^']*)'""")
+_LUA_BLOCK_COMMENT = re.compile(r"--\[(=*)\[.*?\]\1\]", re.S)
 
 
 def parse_lua_keys(text: str) -> dict:
     """`name = "KEY"` and `name = { "KEY", "KEY" }` entries of a Caelestia variables file -> {name: [keys]}.
     Comments are dropped first; anything that is not a string or a list of strings is ignored."""
+    text = _LUA_BLOCK_COMMENT.sub("", text)
     text = re.sub(r"--[^\n]*", "", text)
-    return {name: re.findall(r'"([^"]*)"', value) for name, value in _LUA_ENTRY.findall(text)}
+    return {name: [a or b for a, b in _LUA_STRING.findall(value)] for name, value in _LUA_ENTRY.findall(text)}
 
 
 def pretty_key(key: str) -> str:
@@ -176,10 +179,23 @@ def read_keys(home: str) -> tuple:
     return {**base, **over}, changed, bool(base)
 
 
+def user_home() -> str:
+    """The home whose keys to show: as root (`sudo tapkich keys`) that is the user who called sudo, not /root."""
+    import os
+    user = os.environ.get("SUDO_USER", "")
+    if os.geteuid() == 0 and user and user != "root":
+        try:
+            import pwd
+            return pwd.getpwnam(user).pw_dir
+        except (KeyError, ImportError):
+            pass
+    return os.path.expanduser("~")
+
+
 def key_list(home: str | None = None) -> str:
     """The keys as they are really set right now, grouped; the ones changed from Caelestia's default marked *."""
     import os
-    keys, changed, found = read_keys(home or os.path.expanduser("~"))
+    keys, changed, found = read_keys(home or user_home())
     rows = []
     for group, actions in KEY_ACTIONS:
         lines = []

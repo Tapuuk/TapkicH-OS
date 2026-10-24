@@ -20,7 +20,7 @@ LABEL = "Windows Boot Manager"        # Limine's Windows menu item finds the ent
 LOADER = "\\EFI\\Microsoft\\Boot\\bootmgfw.efi"
 GIB = 1024 ** 3
 
-USAGE = "usage: tapkich restore windows [--check] [--yes] [--disk /dev/xxx --part N]"
+USAGE = "usage: tapkich restore windows [--check] [--yes] [--remove-stale] [--disk /dev/xxx --part N]"
 
 NOTE_LIMINE = ("If TapkicH-OS's boot menu was set up while this entry was missing, its Windows item starts Windows "
                "directly. That works. With BitLocker, start Windows from the firmware boot menu instead.")
@@ -69,6 +69,23 @@ def has_entry(nvram: list, part) -> bool:
     return any(e.label == LABEL and part.partuuid and e.partuuid == part.partuuid.lower() for e in nvram)
 
 
+def other_entries(nvram: list, part) -> list:
+    """Entries with exactly our label that do not point at `part`: Limine finds the entry by name, so they clash."""
+    mine = part.partuuid.lower() if part.partuuid else None
+    return [e for e in nvram if e.label == LABEL and e.partuuid != mine]
+
+
+def stale_entries(nvram: list, part, snap) -> list:
+    """Of those, the ones whose partition no longer exists on any disk. Never one with an unknown target, never one
+    whose partition is still there, never one with another name."""
+    return [e for e in other_entries(nvram, part)
+            if e.label == LABEL and e.partuuid and snap.find_partuuid(e.partuuid) is None]
+
+
+def remove_command(entry) -> list:
+    return ["efibootmgr", "-b", entry.bootnum.upper(), "-B"]
+
+
 def create_command(part) -> list:
     return ["efibootmgr", "--create-only", "--disk", part.disk, "--part", str(part.number),
             "--label", LABEL, "--loader", LOADER]
@@ -107,11 +124,36 @@ def _run(cmd: list) -> str:
     return p.stdout
 
 
-def restore(snap, *, disk="", part=0, check=False, yes=False, run=_run, ask=None, say=print) -> int:
+def restore(snap, *, disk="", part=0, check=False, yes=False, remove_stale=False, run=_run, ask=None,
+            say=print) -> int:
     """Returns the exit code. `run(cmd) -> stdout` and `ask(question) -> bool` are replaced in tests."""
     try:
         target = pick_target(windows_partitions(snap), disk, part)
         nvram, order = _read_list(run)
+        stale = stale_entries(nvram, target, snap)
+        if remove_stale and stale:
+            say(f'These "{LABEL}" boot entries point at a partition that is gone:')
+            for e in stale:
+                say(f"  Boot{e.bootnum}  ({e.partuuid})")
+            if check:
+                return 1
+            if not yes and not (ask and ask("Remove them? [y/N] ")):
+                say("Nothing changed.")
+                return 1
+            for e in stale:
+                run(remove_command(e))
+            nvram, order = _read_list(run)
+            say("Removed.")
+        else:
+            others = other_entries(nvram, target)
+            if others:
+                say(f'There is already another "{LABEL}" entry that points elsewhere (Limine finds the entry by '
+                    "name, so two of them are ambiguous). To remove one:")
+                for e in others:
+                    gone = " (its partition is gone)" if e in stale else ""
+                    say(f"  Boot{e.bootnum}{gone}: sudo efibootmgr -b {e.bootnum.upper()} -B")
+                if stale:
+                    say("Or remove those whose partition is gone: sudo tapkich restore windows --remove-stale")
         if has_entry(nvram, target):
             say(f'The "{LABEL}" boot entry is there (disk {target.disk}, partition {target.number}). Nothing to do.')
             return 0
@@ -141,11 +183,13 @@ def restore(snap, *, disk="", part=0, check=False, yes=False, run=_run, ask=None
 
 
 def parse_args(argv: list) -> dict:
-    opts = {"check": False, "yes": False, "disk": "", "part": 0}
+    opts = {"check": False, "yes": False, "remove_stale": False, "disk": "", "part": 0}
     it = iter(argv)
     for a in it:
         if a == "--check":
             opts["check"] = True
+        elif a == "--remove-stale":
+            opts["remove_stale"] = True
         elif a in ("--yes", "-y"):
             opts["yes"] = True
         elif a in ("--disk", "--part"):

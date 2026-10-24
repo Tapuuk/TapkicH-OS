@@ -65,6 +65,14 @@ def windows_boot_state():
         return None
 
 
+def sudo_rule_command(euid: int, sudo_user: str) -> list:
+    """Root can run anything through sudo, so as root (`sudo tapkich doctor`) ask about the user who called sudo."""
+    cmd = ["sudo", "-n", "-l"]
+    if euid == 0 and sudo_user and sudo_user != "root":
+        cmd += ["-U", sudo_user]
+    return cmd + [gaming.SWITCH, "gaming"]
+
+
 def gather(root: str = "/") -> dict:
     f: dict = {}
     f["gpus"] = nvidia.detect()
@@ -84,7 +92,7 @@ def gather(root: str = "/") -> dict:
         "/usr/bin/gamescope", "/usr/bin/gamescope-session-plus", f"{gaming.SESSIONS_DIR}/{gaming.GAMING_SESSION}",
         f"{gaming.SESSIONS_DIR}/{gaming.RETURN_SESSION}", gaming.SWITCH, gaming.OS_SESSION_SELECT, "/usr/bin/steam")}
     f["sudo_rule"] = True                     # /etc/sudoers.d is root-only: what counts is whether sudo allows it
-    rc, _ = _out(["sudo", "-n", "-l", gaming.SWITCH, "gaming"], timeout=5)
+    rc, _ = _out(sudo_rule_command(os.geteuid(), os.environ.get("SUDO_USER", "")), timeout=5)
     f["sudo_rule_works"] = rc == 0
     rc, out = _out(["systemctl", "is-enabled", gaming.RESET_UNIT], timeout=5)
     f["reset_unit"] = out.strip()
