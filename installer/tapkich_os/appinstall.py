@@ -42,6 +42,9 @@ APPS = [
         "brave-bin"),
 ]
 BY_NAME = {a.name: a for a in APPS}
+# Short names people type; they work but are not listed in the help.
+ALIASES = {"decky": "decky-loader", "brave": "brave-debloated", "chatgpt": "chatgpt-desktop", "claude": "claude-desktop",
+           "google-chrome": "chrome", "telegram-desktop": "telegram", "1pass": "1password"}
 
 
 def help_lines() -> str:
@@ -154,7 +157,8 @@ def install_decky(home: str, run=subprocess.run, urlopen=urllib.request.urlopen,
     homebrew = os.path.join(home, "homebrew")
     os.makedirs(os.path.join(homebrew, "plugins"), exist_ok=True)
     os.makedirs(services, exist_ok=True)
-    run(["sudo", "systemctl", "stop", "plugin_loader"], check=False)                   # a running one blocks the new file
+    if run(["systemctl", "is-active", "--quiet", "plugin_loader"]).returncode == 0:    # a running one blocks the new file
+        run(["sudo", "systemctl", "stop", "plugin_loader"], check=False)
     tmp = binary + ".new"
     with open(tmp, "wb") as f:
         f.write(data)
@@ -175,7 +179,7 @@ def install_decky(home: str, run=subprocess.run, urlopen=urllib.request.urlopen,
         path = os.path.join(home, rel)
         if rel == DECKY_FLAG or os.path.isdir(os.path.dirname(path)):
             open(path, "a").close()
-    out(f"Decky Loader {tag} is installed. It runs in Gaming Mode (Steam's gamepad interface): "
+    out(f"Decky Loader {tag} is installed. It runs in Gaming Mode (Steam's gamepad interface):\n"
         "switch with `tapkich gamemode`, then open Decky from the quick access menu (the ... button).")
     return 0
 
@@ -216,6 +220,8 @@ def install(args: list, home: str | None = None, run=subprocess.run, urlopen=url
     if not args:
         out(usage_text())
         return 0
+    if len(args) == 1:
+        args = [ALIASES.get(args[0], args[0])]
     if len(args) != 1 or args[0] not in BY_NAME:
         out(f"tapkich install: unknown app {' '.join(args)!r}\n\n" + usage_text())
         return 2

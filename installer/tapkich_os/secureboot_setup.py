@@ -170,16 +170,59 @@ def _ask(question: str, default: bool = False) -> bool:
     return default if not answer else answer in ("y", "yes")
 
 
+# Linux's efivarfs marks most firmware variables immutable (chattr +i); writing the key databases needs -i first.
+EFIVARS = "/sys/firmware/efi/efivars"
+KEY_VARIABLES = ("PK-8be4df61-93ca-11d2-aa0d-00e098032b8c", "KEK-8be4df61-93ca-11d2-aa0d-00e098032b8c",
+                 "db-d719b2cb-3d3a-4596-a3bc-dad00e67656f", "dbx-d719b2cb-3d3a-4596-a3bc-dad00e67656f")
+
+
+class EnrollError(RuntimeError):
+    """sbctl could not enroll the keys (the firmware keys are unchanged)."""
+
+
+def _unlock_key_variables(efivars: str | None = None, log=print) -> list:
+    """`chattr -i` on the existing PK, KEK, db and dbx variables. Returns the files that were unlocked."""
+    efivars = efivars or EFIVARS
+    files = [os.path.join(efivars, v) for v in KEY_VARIABLES if os.path.exists(os.path.join(efivars, v))]
+    for f in files:
+        _run(["chattr", "-i", f], check=False)
+    if files:
+        log(f"  unlocked {len(files)} firmware key variables for writing (chattr -i)")
+    return files
+
+
+def _lock_key_variables(files: list, log=print) -> None:
+    """Put `chattr +i` back on the unlocked variables that still exist (the firmware default)."""
+    again = [f for f in files if os.path.exists(f)]
+    for f in again:
+        _run(["chattr", "+i", f], check=False)
+    if again:
+        log("  locked the firmware key variables again (chattr +i)")
+
+
+RESET_STEPS = """  What to do:
+    1. Restart into the firmware setup. On a Lenovo ThinkPad press F1 at power-on, then open
+       Security > Secure Boot and choose "Reset to Setup Mode" or "Clear All Secure Boot Keys".
+       On other computers look for "Clear keys", "Setup Mode" or "Custom mode" in the Secure Boot settings.
+       Do NOT choose "Restore factory keys".
+    2. Save and exit, boot TapkicH-OS, then run `sudo tapkich secureboot setup` again.
+  Clearing the keys also removes Microsoft's from the firmware for a moment; this command puts them back together
+  with ours, so Windows keeps starting with Secure Boot on."""
+
 NOT_SETUP_MODE = """  Your firmware is not in Setup Mode, so new Secure Boot keys cannot be added from here (by design: firmware never
   lets the running system change its keys silently).
 
-  To get there (the names differ per maker):
-    1. Restart into the firmware settings (UEFI / BIOS setup). This command can do that for you.
-    2. Find "Secure Boot". Choose "Reset to Setup Mode", "Clear Secure Boot keys" or "Delete all keys"
-       (on some boards: set "Secure Boot Mode" to "Custom" first). Do NOT choose "Restore factory keys".
-    3. Save and boot TapkicH-OS again, then run `tapkich secureboot setup` once more.
-  Clearing the keys also removes Microsoft's from the firmware for a moment; this command puts them back together
-  with ours, so Windows keeps starting with Secure Boot on.
+""" + RESET_STEPS + """
+
+  Until then nothing is wrong: TapkicH-OS keeps starting normally with Secure Boot off.
+"""
+
+ENROLL_FAILED = """  The keys could not be enrolled. If the firmware is not in Setup Mode (or does not allow it from the running
+  system), do this:
+
+""" + RESET_STEPS + """
+
+  Until then nothing is wrong: TapkicH-OS keeps starting normally with Secure Boot off.
 """
 
 BITLOCKER_WARNING = """  If Windows on this computer uses BitLocker (device encryption), changing Secure Boot keys makes Windows ask for
@@ -224,19 +267,25 @@ def setup(assume_yes: bool = False, from_installer: bool = False, log=print) -> 
         refresh(force=True, log=log)
         if st["setup_mode"]:
             log("  enrolling our keys together with Microsoft's ...")
-            p = _run(["sbctl", "enroll-keys", "--microsoft"], check=False)
-            if p.returncode != 0 and "brick" in (p.stdout + p.stderr).lower():
-                # sbctl asks for this when it cannot read the TPM event log to check option ROMs. With Microsoft's
-                # keys enrolled, option ROMs (graphics cards) signed by Microsoft keep working, which is what it checks.
-                p = _run(["sbctl", "enroll-keys", "--microsoft", "--yes-this-might-brick-my-machine"], check=False)
+            unlocked = _unlock_key_variables(log=log)
+            try:
+                p = _run(["sbctl", "enroll-keys", "--microsoft"], check=False)
+                if p.returncode != 0 and "brick" in (p.stdout + p.stderr).lower():
+                    # sbctl asks for this when it cannot read the TPM event log to check option ROMs. With Microsoft's
+                    # keys enrolled, option ROMs (graphics cards) signed by Microsoft keep working, which is what it checks.
+                    p = _run(["sbctl", "enroll-keys", "--microsoft", "--yes-this-might-brick-my-machine"], check=False)
+            finally:
+                _lock_key_variables(unlocked, log=log)
             if p.returncode != 0:
-                raise RuntimeError("sbctl enroll-keys failed: " + (p.stderr or p.stdout).strip()[-400:])
+                raise EnrollError("sbctl enroll-keys failed: " + (p.stderr or p.stdout).strip()[-400:])
         s = read_state_file()
         s["enrolled"] = "yes"
         with open(STATE_FILE, "w") as f:
             f.write(render_state_file(s))
     except RuntimeError as e:
         log(f"\n  Secure Boot setup stopped: {e}\n  The firmware keys were not changed unless the last step said so.")
+        if isinstance(e, EnrollError):
+            log("\n" + ENROLL_FAILED)
         return 1
     log("""
   Done. Our keys and Microsoft's are enrolled, and the boot files are signed.

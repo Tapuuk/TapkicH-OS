@@ -77,6 +77,8 @@ Everything after the install goes through one command, `tapkich`.
 |  | Linear (an unofficial Linux build) | `tapkich install linear` |
 | Gaming | Decky Loader, plugins for Gaming Mode | `tapkich install decky-loader` |
 
+Short names work too: `decky`, `brave`, `chatgpt`, `claude`, `google-chrome`, `telegram-desktop`, `1pass`.
+
 Steam, Lutris, ProtonUp-Qt, Proton-GE, Discord, Prism Launcher, LocalSend and Waterfox are already installed.
 
 </details>
