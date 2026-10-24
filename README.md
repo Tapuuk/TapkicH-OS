@@ -97,7 +97,7 @@ TapkicH-OS is mostly other people's work, put together:
 Our own code in this repository is GPL-3.0-or-later (see LICENSE). Everything else keeps its own licence:
 
 - **Arch Linux packages** on the ISO and on the installed system are unmodified. Their source and build recipe are linked from each package's page on [archlinux.org/packages](https://archlinux.org/packages/) under "Source Files".
-- **AUR packages we build into the ISO** come from their AUR recipes, unmodified: caelestia-shell and caelestia-cli (GPL-3.0), quickshell-git (LGPL-3.0), paru and protonup-qt (GPL-3.0-or-later), waterfox-bin (MPL-2.0), localsend-bin and qt6-m3shapes-git (Apache-2.0), gamescope-session (MIT), proton-ge-custom-bin (Wine, DXVK and friends, each under its own licence) and a few small libraries under MIT, BSD or OFL. Each recipe on [aur.archlinux.org](https://aur.archlinux.org) names its upstream source.
+- **AUR packages we build into the ISO** come from their AUR recipes, unmodified: caelestia-shell and caelestia-cli (GPL-3.0), quickshell-git (LGPL-3.0), paru and protonup-qt (GPL-3.0-or-later), waterfox-bin (MPL-2.0), localsend-bin and qt6-m3shapes-git (Apache-2.0), gamescope-session (MIT) and a few small libraries under MIT, BSD or OFL. Proton-GE (Wine, DXVK and friends, each under its own licence) is downloaded from the AUR during the install. Each recipe on [aur.archlinux.org](https://aur.archlinux.org) names its upstream source.
 - **Firmware and CPU microcode** (linux-firmware, amd-ucode, intel-ucode, sof-firmware) are binary only and redistributed under their vendors' licences.
 - **Proprietary apps** such as Steam and Discord are never on the ISO. The installer downloads them from the Arch repositories onto your own machine.
 

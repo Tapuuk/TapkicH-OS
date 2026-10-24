@@ -43,13 +43,17 @@ APP_PACKAGES = [
 
 # The user's AUR apps, built into the local repo on the ISO (iso/build-aur.sh) and installed with pacstrap, so the
 # install never builds or repackages them (Proton-GE alone is 1.5 GB). python-inputs/python-steam: ProtonUp-Qt's deps.
-LOCAL_APPS = ["waterfox-bin", "omasnap-bin", "protonup-qt", "proton-ge-custom-bin", "localsend-bin"]
+LOCAL_APPS = ["waterfox-bin", "omasnap-bin", "protonup-qt", "localsend-bin"]
 
 # AUR packages installed at install time with paru, one by one, never fatal. (pkg, label, fallback official packages)
 # Only what cannot go into our ISO: proprietary software is downloaded from its maker onto the user's machine.
 AUR_APPS = [
+    # Proton-GE comes from the AUR at install time: on the ISO it pushed the file over GitHub's 2 GiB release limit
+    ("proton-ge-custom-bin", "Proton-GE, Proton with extra game fixes", []),
     ("claude-code", "Claude Code, the command-line tool (proprietary)", []),
 ]
+# Built without compression: packing Proton-GE's 1.5 GB into a .zst took minutes with no visible progress.
+UNCOMPRESSED = {"proton-ge-custom-bin"}
 AUR_TIMEOUT = 20 * 60                  # seconds; an AUR step that takes longer is stopped and skipped, never hangs
 
 # What opens what. Waterfox is the browser.
@@ -98,7 +102,8 @@ def paru_command(pkg: str, rebuild: bool = False) -> str:
     """paru as the new user. rebuild: build the package again even though it is installed (it was built against an
     older Qt); --needed would skip it."""
     # No --sudoloop: it runs `sudo -v`, which asks for a password even with a NOPASSWD rule (found in the VM test).
-    return f"paru -S --noconfirm --skipreview {'--rebuild' if rebuild else '--needed'} {pkg}"
+    env = "PKGEXT=.pkg.tar " if pkg in UNCOMPRESSED else ""
+    return f"{env}paru -S --noconfirm --skipreview {'--rebuild' if rebuild else '--needed'} {pkg}"
 
 
 # ---- AUR packages from the ISO: rebuilt only when needed ----------------------------------------------------------

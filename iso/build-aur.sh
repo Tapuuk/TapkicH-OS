@@ -16,9 +16,9 @@ PKGS=(
   python-materialyoucolor libcava qt6-m3shapes-git quickshell-git ttf-rubik-vf
   caelestia-cli caelestia-shell
   darkly-bin qtengine papirus-folders pwvucontrol
-  # the user's apps: built here so the install only copies them (Proton-GE is a 1.5 GB package; repackaging it at
-  # install time looked frozen for minutes in VirtualBox)
-  waterfox-bin omasnap-bin python-inputs python-steam protonup-qt proton-ge-custom-bin localsend-bin
+  # the user's apps: built here so the install only copies them (Proton-GE is not here: it would push the ISO over
+  # GitHub's 2 GiB release limit, so the installer gets it from the AUR)
+  waterfox-bin omasnap-bin python-inputs python-steam protonup-qt localsend-bin
   # Gaming Mode: ChimeraOS's gamescope session with Steam's gamepad UI (both MIT)
   gamescope-session-git gamescope-session-steam-git
 )
