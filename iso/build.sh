@@ -11,6 +11,7 @@ WORK=/root/tapkich-os-build
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="*"   # the checkout is owned by the Windows user
 # TAPKICH_RELEASE=1: a release ISO is built only from a clean tree at the pushed origin/main commit
 if [[ ${TAPKICH_RELEASE:-0} == 1 ]]; then
+  [[ ${SELFTEST:-0} == 0 ]] || { echo "release build refused: a selftest/autoinstall ISO is a test image (it installs by itself)"; exit 1; }
   [[ -z $(git -C "$REPO" status --porcelain -- installer packaging iso theme LICENSE) ]] || { echo "release build refused: uncommitted changes in installer packaging iso theme LICENSE"; exit 1; }
   git -C "$REPO" fetch -q origin main 2>/dev/null || true
   [[ $(git -C "$REPO" rev-parse HEAD) == $(git -C "$REPO" rev-parse origin/main) ]] || { echo "release build refused: HEAD is not origin/main (push the commit first)"; exit 1; }

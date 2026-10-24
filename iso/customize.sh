@@ -11,6 +11,14 @@ cp "$P/pacman.conf" "$P/airootfs/etc/pacman.conf"
 
 # 2. Kernel: swap linux -> linux-zen (official Arch package); add the installer's dependencies
 sed -i '/^linux$/d;/^nmap$/d' "$P/packages.x86_64"   # nmap: not GPL-compatible licence, not needed
+# Stock rescue/network tools the installer never uses: they only cost space (a release asset must stay under 2 GiB)
+for p in archinstall clonezilla cloud-init fsarchiver partimage irssi lynx lftp mc tcpdump darkhttpd refind \
+         openconnect openvpn vpnc pptpclient xl2tpd wvdial bcachefs-tools; do
+  sed -i "/^$p\$/d" "$P/packages.x86_64"
+done
+# Hyprland's own sample wallpapers (~49 MB): the kiosk draws ours. Only the ISO build skips them (the live system's
+# pacman.conf, copied above, and so the installed system, are unchanged).
+sed -i '/^\[options\]/a NoExtract = usr/share/hypr/wall*.png' "$P/pacman.conf"
 cat >> "$P/packages.x86_64" <<'EOF'
 linux-zen
 python
@@ -68,6 +76,9 @@ ID_LIKE=arch
 BUILD_ID=rolling
 ANSI_COLOR="38;2;124;58;237"
 OSR
+# 4c. No SSH server on the installer: releng allows root login over SSH, and the installer does not need it
+rm -f "$P/airootfs/etc/systemd/system/multi-user.target.wants/sshd.service" \
+      "$P/airootfs/etc/ssh/sshd_config.d/10-archiso.conf"
 # 4d. Quiet boot (normal builds): no kernel / initramfs text, no "Welcome to ..." line; the screen goes straight to the installer
 if [[ ${SELFTEST:-0} == 0 ]]; then
   sed -i 's#^\(options .*\)$#\1 quiet loglevel=3 systemd.show_status=false vt.global_cursor_default=0#' "$P"/efiboot/loader/entries/*.conf
