@@ -140,25 +140,68 @@ def refresh(boot: str = BOOT, state_path: str = STATE_FILE, force: bool = False,
                   for e in LIMINE_EFIS)
     changed = force or not efis_ok or conf_hash != st.get("config_hash") or src_hash != st.get("limine_source_hash")
     if changed:
-        for c in LIMINE_CONFS:
-            path = os.path.join(boot, c)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as f:
-                f.write(new)
-        for e in LIMINE_EFIS:
-            path = os.path.join(boot, e)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            shutil.copyfile(LIMINE_SRC, path)           # a clean binary each time (enroll-config writes into it)
-            _run(["limine", "enroll-config", "--quiet", path, conf_hash])
-            _run(["sbctl", "sign", "-s", path])
-            st[f"signed_{e}"] = blake2b_file(path)      # signing changes the file: hash it afterwards
+        _install_limine(boot, new, conf_hash, st, log)
         st.update(config_hash=conf_hash, limine_source_hash=src_hash)
         log("  boot menu config hashed and enrolled; Limine signed")
     st["enrolled"] = st.get("enrolled", "no")
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    with open(state_path, "w") as f:
+    tmp = state_path + ".new"
+    with open(tmp, "w") as f:
         f.write(render_state_file(st))
+    os.replace(tmp, state_path)
     return True
+
+
+SIGN_MARGIN = 64 * 1024            # signing adds a signature to the binary; room for it per file
+
+
+def _install_limine(boot: str, conf: str, conf_hash: str, st: dict, log=print) -> None:
+    """Replace both Limine copies and both configs without ever leaving a half-written file.
+    Everything is first built as `<file>.new` beside its target (copy, enroll the config hash, sign, check). Only when
+    all of them are ready are they moved into place, one directory at a time (config, then its Limine binary), so at
+    most one of the two boot paths is inconsistent for a moment and the other one stays complete. On any error the
+    new files are deleted and the old ones are untouched."""
+    pairs = list(zip(LIMINE_CONFS, LIMINE_EFIS))
+    targets = [os.path.join(boot, x) for pair in pairs for x in pair]
+    staged = [t + ".new" for t in targets]
+    src_size = os.path.getsize(LIMINE_SRC)                    # missing source: OSError, nothing written yet
+    need = len(LIMINE_EFIS) * (src_size + SIGN_MARGIN) + len(LIMINE_CONFS) * len(conf.encode())
+    free = shutil.disk_usage(boot).free
+    if free < need:
+        raise RuntimeError(f"not enough free space on the boot partition: {need // 1024} KiB needed, "
+                           f"{free // 1024} KiB free. Nothing was changed.")
+    try:
+        for path in staged:                                   # leftovers of an earlier interrupted run
+            if os.path.lexists(path):
+                os.remove(path)
+        for conf_rel, efi_rel in pairs:
+            conf_new = os.path.join(boot, conf_rel) + ".new"
+            efi_new = os.path.join(boot, efi_rel) + ".new"
+            os.makedirs(os.path.dirname(conf_new), exist_ok=True)
+            os.makedirs(os.path.dirname(efi_new), exist_ok=True)
+            with open(conf_new, "w") as f:
+                f.write(conf)
+                f.flush()
+                os.fsync(f.fileno())
+            shutil.copyfile(LIMINE_SRC, efi_new)              # a clean binary each time (enroll-config writes into it)
+            _run(["limine", "enroll-config", "--quiet", efi_new, conf_hash])
+            _run(["sbctl", "sign", efi_new])
+            if not os.path.isfile(efi_new) or os.path.getsize(efi_new) < src_size:
+                raise RuntimeError(f"the new {efi_rel} is incomplete; the old files were kept")
+        hashes = {}
+        for conf_rel, efi_rel in pairs:
+            os.replace(os.path.join(boot, conf_rel) + ".new", os.path.join(boot, conf_rel))
+            os.replace(os.path.join(boot, efi_rel) + ".new", os.path.join(boot, efi_rel))
+            _run(["sbctl", "sign", "-s", os.path.join(boot, efi_rel)], check=False)    # remember it for sbctl's own hook
+            hashes[efi_rel] = blake2b_file(os.path.join(boot, efi_rel))
+        for efi_rel, h in hashes.items():
+            st[f"signed_{efi_rel}"] = h
+    finally:
+        for path in staged:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def _ask(question: str, default: bool = False) -> bool:
@@ -166,7 +209,7 @@ def _ask(question: str, default: bool = False) -> bool:
     try:
         answer = input(f"  {question} {hint} ").strip().lower()
     except EOFError:
-        return default
+        return False                    # nobody answered (piped or scripted run): never change the firmware unasked
     return default if not answer else answer in ("y", "yes")
 
 
@@ -174,6 +217,9 @@ def _ask(question: str, default: bool = False) -> bool:
 EFIVARS = "/sys/firmware/efi/efivars"
 KEY_VARIABLES = ("PK-8be4df61-93ca-11d2-aa0d-00e098032b8c", "KEK-8be4df61-93ca-11d2-aa0d-00e098032b8c",
                  "db-d719b2cb-3d3a-4596-a3bc-dad00e67656f", "dbx-d719b2cb-3d3a-4596-a3bc-dad00e67656f")
+
+
+_firmware_touched = False          # set once setup starts writing firmware variables (for an accurate Ctrl-C message)
 
 
 class EnrollError(RuntimeError):
@@ -232,6 +278,8 @@ BITLOCKER_WARNING = """  If Windows on this computer uses BitLocker (device encr
 
 
 def setup(assume_yes: bool = False, from_installer: bool = False, log=print) -> int:
+    global _firmware_touched
+    _firmware_touched = False
     from .secureboot import read_state
     if os.geteuid() != 0:
         log("tapkich secureboot setup must run as root (sudo tapkich secureboot setup).")
@@ -267,6 +315,7 @@ def setup(assume_yes: bool = False, from_installer: bool = False, log=print) -> 
         refresh(force=True, log=log)
         if st["setup_mode"]:
             log("  enrolling our keys together with Microsoft's ...")
+            _firmware_touched = True
             unlocked = _unlock_key_variables(log=log)
             try:
                 p = _run(["sbctl", "enroll-keys", "--microsoft"], check=False)
@@ -282,7 +331,7 @@ def setup(assume_yes: bool = False, from_installer: bool = False, log=print) -> 
         s["enrolled"] = "yes"
         with open(STATE_FILE, "w") as f:
             f.write(render_state_file(s))
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         log(f"\n  Secure Boot setup stopped: {e}\n  The firmware keys were not changed unless the last step said so.")
         if isinstance(e, EnrollError):
             log("\n" + ENROLL_FAILED)
@@ -305,12 +354,21 @@ def main(args: list) -> int:
             return 1
         try:
             refresh(force="--force" in args, log=(lambda *_: None) if hook else print)
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             print(f"TapkicH-OS Secure Boot: could not re-sign the boot files: {e}\n"
-                  "Do not restart with Secure Boot on before this is fixed (run `sudo tapkich secureboot refresh`).")
+                  "The old boot files were kept. Do not restart with Secure Boot on before this is fixed "
+                  "(run `sudo tapkich secureboot refresh`).")
             return 1
+        except KeyboardInterrupt:
+            print("Stopped. The old boot files were kept.")
+            return 130
         return 0
-    return setup(assume_yes="--yes" in args, from_installer="--from-installer" in args)
+    try:
+        return setup(assume_yes="--yes" in args, from_installer="--from-installer" in args)
+    except KeyboardInterrupt:
+        print("Stopped. " + ("The firmware keys may have been changed: run `sudo tapkich secureboot status` to see."
+                             if _firmware_touched else "Nothing was changed in the firmware."))
+        return 130
 
 
 if __name__ == "__main__":

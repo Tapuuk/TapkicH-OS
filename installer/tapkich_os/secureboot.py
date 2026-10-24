@@ -6,8 +6,12 @@ All file reads go through `root` so tests can point at a fake /sys and /proc tre
 """
 from __future__ import annotations
 
+import base64
 import glob
 import os
+import re
+import struct
+import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -18,6 +22,35 @@ EFI_SECURITY_DB = "d719b2cb-3d3a-4596-a3bc-dad00e67656f"
 MS_DB_MARKERS = (b"Microsoft Corporation UEFI CA", b"Microsoft Windows Production PCA",
                  b"Microsoft UEFI CA 2023", b"Windows UEFI CA 2023")
 MS_KEK_MARKERS = (b"Microsoft Corporation KEK CA", b"Microsoft Corporation KEK 2K CA 2023")
+
+EFI_CERT_X509_GUID = uuid.UUID("a5c059a1-94e4-4aa7-87b5-ab155c2bf072").bytes_le
+OUR_DB_CERT = "var/lib/sbctl/keys/db/db.pem"
+STATE_FILE = "etc/tapkich-os/secureboot.conf"
+
+
+def efi_x509_certs(efivar_data: bytes) -> list:
+    """The DER certificates inside a db efivar (4 attribute bytes, then EFI_SIGNATURE_LISTs; only X509 lists count)."""
+    out, data, pos = [], efivar_data[4:], 0
+    while pos + 28 <= len(data):
+        sig_type = data[pos:pos + 16]
+        list_size, header_size, sig_size = struct.unpack_from("<III", data, pos + 16)
+        if list_size < 28 or sig_size <= 16 or pos + list_size > len(data):
+            break
+        if sig_type == EFI_CERT_X509_GUID:
+            at = pos + 28 + header_size
+            while at + sig_size <= pos + list_size:
+                out.append(data[at + 16:at + sig_size])          # skip the 16-byte owner GUID
+                at += sig_size
+        pos += list_size
+    return out
+
+
+def pem_to_der(text: str) -> bytes | None:
+    m = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", text, re.S)
+    try:
+        return base64.b64decode("".join(m.group(1).split())) if m else None
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -40,6 +73,17 @@ def _efivar(root: str, name: str, guid: str):
     return _read(root, f"sys/firmware/efi/efivars/{name}-{guid}", binary=True)
 
 
+def _our_key_in_db(root: str, db: bytes) -> bool:
+    """True when our database certificate (kept by sbctl, root-only) is among the certificates in the db variable.
+    The state file written by `tapkich secureboot setup` counts as the first signal."""
+    state = _read(root, STATE_FILE) or ""
+    if "enrolled=yes" in state.split():
+        return True
+    pem = _read(root, OUR_DB_CERT)
+    der = pem_to_der(pem) if pem else None
+    return bool(der) and der in efi_x509_certs(db)
+
+
 def read_state(root: str = "/") -> dict:
     """Everything we look at, as plain data (also what tests build fixtures for)."""
     st: dict = {}
@@ -55,12 +99,17 @@ def read_state(root: str = "/") -> dict:
     kek = _efivar(root, "KEK", EFI_GLOBAL) or b""
     st["ms_in_db"] = any(m in db for m in MS_DB_MARKERS)
     st["ms_in_kek"] = any(m in kek for m in MS_KEK_MARKERS)
-    st["tapkich_key_in_db"] = b"TapkicH-OS" in db
+    st["tapkich_key_in_db"] = _our_key_in_db(root, db)
     tpm_major = _read(root, "sys/class/tpm/tpm0/tpm_version_major")
     st["tpm2"] = None if not os.path.isdir(os.path.join(root, "sys/class/tpm/tpm0")) else (tpm_major or "").strip() == "2"
     st["tpm_present"] = os.path.isdir(os.path.join(root, "sys/class/tpm/tpm0"))
-    log = _read(root, "sys/kernel/security/tpm0/binary_bios_measurements", binary=True)
-    st["measured_boot_log"] = bool(log)
+    try:                                              # the log is root-only: a normal user cannot tell
+        with open(os.path.join(root, "sys/kernel/security/tpm0/binary_bios_measurements"), "rb") as f:
+            st["measured_boot_log"] = bool(f.read(1))
+    except PermissionError:
+        st["measured_boot_log"] = None
+    except OSError:
+        st["measured_boot_log"] = False
     lock = _read(root, "sys/kernel/security/lockdown")
     st["lockdown"] = None
     if lock:
@@ -98,8 +147,10 @@ def evaluate(st: dict) -> list:
     c.append(Check("TPM 2.0 present", st["tpm2"] if st["tpm_present"] else False,
                    "TPM 2.0 found" if st["tpm2"] else ("TPM found but not version 2.0" if st["tpm_present"] else "no TPM found"),
                    "Turn on fTPM / PTT / TPM 2.0 in the firmware settings."))
-    c.append(Check("Measured boot (TPM boot log)", st["measured_boot_log"],
-                   "firmware boot log present" if st["measured_boot_log"] else "no TPM boot log",
+    mb = st["measured_boot_log"]
+    c.append(Check("Measured boot (TPM boot log)", mb,
+                   "unknown: the log is readable by root only, run `sudo tapkich secureboot status`" if mb is None
+                   else "firmware boot log present" if mb else "no TPM boot log",
                    "Needs a TPM; the bootloader must also record what it loads (Limine support unverified)."))
     c.append(Check("Kernel lockdown = integrity", st["lockdown"] in ("integrity", "confidentiality") if st["lockdown"] else False,
                    f"lockdown mode: {st['lockdown'] or 'not available'}",

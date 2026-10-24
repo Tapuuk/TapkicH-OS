@@ -75,15 +75,30 @@ def main(args: list, boot: str = sb.BOOT, state_path: str = sb.STATE_FILE) -> in
     if value is None:
         print(f"tapkich: {args[1]!r} is not a number of seconds from 0 to 60 (or `no`)\n{USAGE}")
         return 2
+    before = {}
+    for c in sb.LIMINE_CONFS:                          # kept, so a failed re-signing can put the old configs back
+        try:
+            with open(f"{boot}/{c}", newline="") as f:
+                before[f"{boot}/{c}"] = f.read()
+        except OSError:
+            pass
     if not set_timeout(value, boot):
         print("tapkich: no boot menu config found on /boot")
         return 1
     if os.path.isfile(state_path):                     # Secure Boot set up: the new config must be hashed and enrolled
         try:
             sb.refresh(boot, state_path)
-        except RuntimeError as e:
-            print(f"tapkich: the countdown is changed, but the boot files could not be re-signed: {e}\n"
-                  "Do not restart with Secure Boot on before this is fixed (run `sudo tapkich secureboot refresh`).")
+        except (RuntimeError, OSError) as e:
+            restored = True
+            for path, text in before.items():          # the enrolled hash belongs to the old config: put it back
+                try:
+                    with open(path, "w", newline="") as f:
+                        f.write(text)
+                except OSError:
+                    restored = False
+            print(f"tapkich: the countdown was not changed, the boot files could not be re-signed: {e}\n"
+                  + ("The old boot files were kept." if restored else
+                     "Do not restart with Secure Boot on before this is fixed (run `sudo tapkich secureboot refresh`)."))
             return 1
     print(f"Boot menu countdown: {value if value == 'no' else value + ' s'}")
     return 0
