@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 from dataclasses import dataclass
 
 from . import gaming, nvidia, restore, secureboot, secureboot_setup, update
@@ -105,10 +106,13 @@ def gather(root: str = "/") -> dict:
     f["disk"] = {}
     for mount in ("/", "/boot"):
         try:
+            if mount == "/boot" and not os.path.ismount(mount):    # else this is the system disk's free space
+                continue
             u = shutil.disk_usage(mount)
             f["disk"][mount] = (u.free, u.total)
         except OSError:
             pass
+    f["boot_mounted"] = os.path.ismount("/boot")
     f["windows_boot"] = windows_boot_state()
     conf = update.read_conf()
     f["update_enabled"] = conf["enabled"]
@@ -185,7 +189,7 @@ def evaluate(f: dict) -> list:
     missing = [p for p, there in files.items() if not there]
     if missing:
         v.append(Verdict("Gaming Mode", PROBLEM, "missing: " + ", ".join(missing),
-                         "sudo pacman -S --needed steam gamescope (the session files come with TapkicH-OS: `tapkich update`)"))
+                         "sudo pacman -S --needed steam gamescope   (the session files come with TapkicH-OS: `tapkich update`)"))
     else:
         v.append(Verdict("Gaming Mode", OK, "gamescope, Steam and the Gaming Mode session are installed"))
     if not f.get("sudo_rule") or not f.get("sudo_rule_works"):
@@ -250,6 +254,10 @@ def evaluate(f: dict) -> list:
             v.append(Verdict("Disk", NOTE, f"{free / GIB:.1f} GiB free on the system disk (games need a lot more)"))
         else:
             v.append(Verdict("Disk", OK, f"{free / GIB:.0f} GiB free of {total / GIB:.0f} GiB"))
+    if "/boot" not in disk and f.get("boot_mounted") is False:
+        v.append(Verdict("Disk", NOTE, "/boot is not a mounted partition: kernel and boot loader updates would be "
+                         "written to the system disk instead of the boot partition",
+                         "Mount the EFI system partition on /boot (see /etc/fstab)."))
     if "/boot" in disk:
         free, _ = disk["/boot"]
         if free < 120 * MIB:
@@ -271,6 +279,30 @@ def evaluate(f: dict) -> list:
     return v
 
 
+WIDTH = 100                  # no line is wider than this
+FIX_PREFIX = "         -> "
+
+
+def _fix_lines(fix: str) -> list:
+    """The fix text within WIDTH columns. A `sudo ...` command is broken with a trailing backslash, so the lines
+    still paste into a shell as one command; a note in parentheses after it goes on its own line."""
+    if not fix.startswith("sudo "):
+        return textwrap.wrap(fix, WIDTH, initial_indent=FIX_PREFIX, subsequent_indent=" " * len(FIX_PREFIX))
+    cmd, _, note = fix.partition("   ")
+    pad = " " * len(FIX_PREFIX)
+    if len(FIX_PREFIX + cmd) <= WIDTH:
+        lines = [FIX_PREFIX + cmd]
+    else:
+        lines, cur = [], FIX_PREFIX
+        for word in cmd.split(" "):
+            if len(cur) + len(word) + 2 > WIDTH and cur.strip() != "->":     # the trailing backslash continues the command
+                lines.append(cur.rstrip() + " \\")
+                cur = pad + "  "
+            cur += word + " "
+        lines.append(cur.rstrip())
+    return lines + (textwrap.wrap(note.strip(), WIDTH, initial_indent=pad, subsequent_indent=pad) if note else [])
+
+
 def render(verdicts: list) -> str:
     mark = {OK: "[ ok ]", NOTE: "[note]", PROBLEM: "[FIX ]"}
     lines, area = ["TapkicH-OS doctor", ""], None
@@ -278,9 +310,9 @@ def render(verdicts: list) -> str:
         if x.area != area:
             area = x.area
             lines.append(area)
-        lines.append(f"  {mark[x.level]} {x.text}")
+        lines += textwrap.wrap(x.text, WIDTH, initial_indent=f"  {mark[x.level]} ", subsequent_indent=" " * 9)
         if x.fix and x.level != OK:
-            lines.append(f"         -> {x.fix}")
+            lines += _fix_lines(x.fix)
     problems = sum(1 for x in verdicts if x.level == PROBLEM)
     lines += ["", "Everything looks fine." if not problems else
               f"{problems} thing(s) to fix: the lines marked [FIX ] say how."]

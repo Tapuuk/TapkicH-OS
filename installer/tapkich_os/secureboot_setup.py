@@ -344,10 +344,21 @@ def setup(assume_yes: bool = False, from_installer: bool = False, log=print) -> 
     return 0
 
 
+USAGE = "usage: tapkich secureboot setup | refresh | status"
+SETUP_FLAGS = ("--yes", "--from-installer")
+REFRESH_FLAGS = ("--hook", "--force")
+
+
 def main(args: list) -> int:
+    allowed = REFRESH_FLAGS if args[:1] == ["refresh"] else SETUP_FLAGS
+    if args[:1] not in (["setup"], ["refresh"], []) or any(a not in allowed for a in args[1:]):
+        print(USAGE, file=sys.stderr)                         # an unknown option must never start the real setup
+        return 2
     if args[:1] == ["refresh"]:
         hook = "--hook" in args
         if not os.path.isfile(STATE_FILE):
+            if not hook:
+                print("Secure Boot is not set up, so there is nothing to sign (`sudo tapkich secureboot setup`).")
             return 0                                          # not set up: nothing to keep signed
         if os.geteuid() != 0:
             print("tapkich secureboot refresh must run as root")

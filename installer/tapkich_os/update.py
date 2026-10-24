@@ -335,7 +335,7 @@ def main(argv=None) -> int:
     yes = bool(args)                                  # unattended: no questions from pacman or paru
     conf = read_conf()
     steps = []
-    _say("Updating everything: TapkicH-OS, the system, AUR packages and Flatpak apps. You may be asked for your password.")
+    _say("Updating everything: TapkicH-OS, the system, AUR packages and Flatpak apps.\nYou may be asked for your password.")
 
     _head("TapkicH-OS")
     ch = channel_step(conf)
@@ -347,7 +347,7 @@ def main(argv=None) -> int:
     config = temp_pacman_conf() if ch.skip_repo else ""
     try:
         if ch.skip_repo and not config:
-            s.result, s.note = "failed", "could not prepare pacman's configuration without the TapkicH-OS repository"
+            s.result, s.note = "failed", "could not set pacman up without the TapkicH-OS repository"
             _say("  " + s.note)
         else:
             # the keyring step and the full upgrade belong together (-Sy alone is a partial upgrade); a failed keyring
@@ -372,7 +372,7 @@ def main(argv=None) -> int:
     _head("AUR packages (paru)")
     s = Step("AUR packages")
     if os.geteuid() == 0:
-        s.note = "paru does not run as root: run `tapkich update` without sudo to update AUR packages"
+        s.note = "paru does not run as root (run `tapkich update` without sudo)"
         _say("  " + s.note)
     elif shutil.which("paru"):
         rc = _run(["paru", "-Sua"] + (["--noconfirm"] if yes else []))
@@ -396,9 +396,6 @@ def main(argv=None) -> int:
     _say("\nSummary")
     for st in steps:
         mark = {"ok": "done   ", "failed": "FAILED ", "skipped": "skipped"}[st.result]
-        if st.skip_repo:
-            _say(f"  {mark} {st.name}: TapkicH-OS updates skipped this time: {st.note}; the rest updated")
-            continue
         _say(f"  {mark} {st.name}" + (f": {st.note}" if st.note and st.result != "ok" else ""))
     failed = [st for st in steps if st.result == "failed"]
     if failed:

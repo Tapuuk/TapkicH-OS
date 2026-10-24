@@ -23,9 +23,12 @@ HELP_COMMANDS = [
     ("tapkich install [<app>]", "Install an optional app (the list is below); without a name it prints the list"),
     ("tapkich secureboot status", "Secure Boot, and what anti-cheat (Epic EAC for Linux) needs: TPM, kernel settings"),
     ("tapkich secureboot setup", "Turn Secure Boot on with our own keys, keeping Microsoft's (Windows keeps starting)"),
+    ("tapkich secureboot refresh", "Sign the boot files again after you changed them by hand (updates do it for you)"),
     ("tapkich restore windows [--check|--yes|--remove-stale]",
      "Put the firmware's \"Windows Boot Manager\" boot entry back if it went missing; --remove-stale also removes "
      "leftover ones whose partition is gone"),
+    ("tapkich restore windows --disk /dev/xxx --part N",
+     "Pick the Windows partition when there is more than one"),
     ("tapkich bootloader timeout [<seconds>]",
      "Show or set the boot menu countdown (0 to 60 seconds, or `no` to wait for you)"),
     ("tapkich help", "This help (also: tapkich --help, tapkich -h, or just tapkich)"),
@@ -89,6 +92,11 @@ def main(argv=None) -> int:
         print(HELP)
         return 0
     cmd = args[0]
+    if (cmd in ("keys", "doctor", "gamemode") and len(args) > 1) or (cmd == "secureboot" and args[1:2] == ["status"]
+                                                                      and len(args) > 2):
+        print(f"tapkich {' '.join(args[:2]) if cmd == 'secureboot' else cmd}: takes no options (see `tapkich help`)",
+              file=sys.stderr)
+        return 2
     if cmd == "install":
         return appinstall.install(args[1:])
     if cmd == "gamemode":
@@ -106,7 +114,7 @@ def main(argv=None) -> int:
         sub = ["setup", *args[1:]] if cmd == "secureboot_setup" else args[1:]
         if os.geteuid() != 0:                         # the keys and the boot partition belong to root
             here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            os.execvp("sudo", ["sudo", "env", f"PYTHONPATH={here}", sys.executable, "-P", "-m", "tapkich_os.command",
+            os.execvp("sudo", ["sudo", "env", f"PYTHONPATH={here}", "PYTHONDONTWRITEBYTECODE=1", sys.executable, "-P", "-m", "tapkich_os.command",
                                "secureboot", *sub])
         from . import secureboot_setup
         return secureboot_setup.main(sub)
@@ -117,7 +125,7 @@ def main(argv=None) -> int:
             return 2
         if os.geteuid() != 0:                         # reading the disks and writing the boot list need root
             here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            os.execvp("sudo", ["sudo", "env", f"PYTHONPATH={here}", sys.executable, "-P", "-m", "tapkich_os.command",
+            os.execvp("sudo", ["sudo", "env", f"PYTHONPATH={here}", "PYTHONDONTWRITEBYTECODE=1", sys.executable, "-P", "-m", "tapkich_os.command",
                                *args])
         from . import restore
         return restore.main(args[2:])
@@ -127,7 +135,7 @@ def main(argv=None) -> int:
             return bootloader.main(args[1:])          # prints the usage
         if os.geteuid() != 0:                         # the boot partition is root-only, and so is the refresh
             here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            os.execvp("sudo", ["sudo", "env", f"PYTHONPATH={here}", sys.executable, "-P", "-m", "tapkich_os.command",
+            os.execvp("sudo", ["sudo", "env", f"PYTHONPATH={here}", "PYTHONDONTWRITEBYTECODE=1", sys.executable, "-P", "-m", "tapkich_os.command",
                                *args])
         return bootloader.main(args[1:])
     if cmd == "secureboot" and args[1:2] in (["status"], []):

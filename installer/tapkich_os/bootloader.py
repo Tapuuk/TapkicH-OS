@@ -14,9 +14,10 @@ from . import secureboot_setup as sb
 
 USAGE = ("usage: tapkich bootloader timeout [<seconds>]\n"
          "  timeout            print the boot menu countdown\n"
-         "  timeout <seconds>  set it: 0 to 60 seconds (0 = start the default entry at once, without showing the menu),\n"
-         "                     or `no` to wait until you choose")
-_LINE = re.compile(r"^[ \t]*timeout[ \t]*:[ \t]*(\S*)[ \t]*$", re.M | re.I)
+         "  timeout <seconds>  set it: 0 to 60 seconds (0 = start the default entry at once, without\n"
+         "                     showing the menu), or `no` to wait until you choose")
+_LINE = re.compile(r"^[ \t]*timeout[ \t]*:[ \t]*(\S*)[ \t]*(\r?)$", re.M | re.I)    # \r: a config with Windows line ends
+LIMINE_DEFAULT = "5"                              # Limine's own countdown when limine.conf has no timeout line
 ZERO_WARNING = ("Warning: with 0 the boot menu is not shown, so recovery and Windows cannot be reached from it.\n"
                 "To get it back, run `tapkich bootloader timeout 3` from TapkicH-OS.")
 
@@ -31,16 +32,19 @@ def parse(value: str) -> str | None:
 
 
 def current(boot: str = sb.BOOT) -> str | None:
-    """The timeout in the first limine.conf found, or None."""
+    """The timeout in the first limine.conf found; Limine's default when that file has no timeout line; None when
+    there is no limine.conf at all."""
+    found = False
     for c in sb.LIMINE_CONFS:
         try:
             with open(f"{boot}/{c}") as f:
                 m = _LINE.search(f.read())
         except OSError:
             continue
+        found = True
         if m:
             return m.group(1)
-    return None
+    return LIMINE_DEFAULT if found else None
 
 
 def set_timeout(value: str, boot: str = sb.BOOT) -> list:
@@ -53,9 +57,10 @@ def set_timeout(value: str, boot: str = sb.BOOT) -> list:
                 text = f.read()
         except OSError:
             continue
-        new, n = _LINE.subn(f"timeout: {value}", text, count=1)
+        new, n = _LINE.subn(lambda m: f"timeout: {value}{m.group(2)}", text, count=1)
         if n == 0:                                    # no line yet: Limine's default is 5 s, so say it explicitly
-            new = f"timeout: {value}\n{text}"
+            eol = "\r\n" if "\r\n" in text else "\n"
+            new = f"timeout: {value}{eol}{text}"
         with open(path, "w", newline="") as f:
             f.write(new)
         done.append(path)

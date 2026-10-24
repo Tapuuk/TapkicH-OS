@@ -11,6 +11,7 @@ import glob
 import os
 import re
 import struct
+import textwrap
 import uuid
 from dataclasses import dataclass
 from typing import Optional
@@ -184,12 +185,15 @@ def summarize(checks: list) -> str:
     return "All checks pass."
 
 
+WIDTH = 100                  # no line is wider than this
+
+
 def render(checks: list) -> str:
     lines = ["Anti-cheat readiness (Epic EAC Linux v2, announced 2026-10-14, requirements may change)", ""]
     for x in checks:
         mark = {True: "[ ok ]", False: "[FAIL]", None: "[ ?? ]"}[x.ok]
-        lines.append(f"{mark} {x.name}: {x.detail}")
+        lines += textwrap.wrap(f"{mark} {x.name}: {x.detail}", WIDTH, subsequent_indent=" " * 7)
         if x.ok is not True and x.fix:
-            lines.append(f"         -> {x.fix}")
+            lines += textwrap.wrap(x.fix, WIDTH, initial_indent="         -> ", subsequent_indent=" " * 12)
     lines += ["", summarize(checks)]
     return "\n".join(lines)

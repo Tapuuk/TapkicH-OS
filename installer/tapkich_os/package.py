@@ -24,7 +24,7 @@ HOOKS = "/usr/share/libalpm/hooks"
 
 TAPKICH_WRAPPER = """#!/bin/sh
 # tapkich: the one command for tweaking this system (see `tapkich help`)
-exec env PYTHONPATH=/opt/tapkich-os python3 -P -m tapkich_os.command "$@"
+exec env PYTHONPATH=/opt/tapkich-os PYTHONDONTWRITEBYTECODE=1 python3 -P -m tapkich_os.command "$@"
 """
 
 OS_RELEASE = """NAME="TapkicH-OS"

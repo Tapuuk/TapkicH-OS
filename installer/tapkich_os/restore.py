@@ -9,10 +9,12 @@ Pure helpers (find the target, decide, build the commands) are unit-tested with 
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import sys
+import textwrap
 
 from . import detect, planner
 
@@ -87,6 +89,20 @@ def describe_entry(e) -> str:
     return f"Boot{e.bootnum}  {e.label}  partition {e.partuuid}  file {e.path or '(none)'}"
 
 
+WIDTH = 100                  # no printed line is wider than this
+
+
+def fit(say):
+    """`say` that breaks every line longer than WIDTH at a space (continuation lines are indented two more)."""
+    def out(text=""):
+        for line in str(text).splitlines() or [""]:
+            indent = " " * (len(line) - len(line.lstrip()) + 2)
+            for part in textwrap.wrap(line, WIDTH, subsequent_indent=indent, break_long_words=False,
+                                      break_on_hyphens=False) or [""]:
+                say(part)
+    return out
+
+
 def skipped_refusal(snap) -> str:
     """Why nothing may be deleted: detection could not read some devices, so a partition that looks gone might sit
     on one of them. '' when the picture is complete."""
@@ -142,6 +158,7 @@ def _run(cmd: list) -> str:
 def restore(snap, *, disk="", part=0, check=False, yes=False, remove_stale=False, run=_run, ask=None,
             say=print) -> int:
     """Returns the exit code. `run(cmd) -> stdout` and `ask(question) -> bool` are replaced in tests."""
+    say = fit(say)
     try:
         parts = windows_partitions(snap)
         if not parts and not remove_stale:
@@ -266,6 +283,10 @@ def main(argv=None) -> int:
     if missing:                                    # without them every disk with an EFI or Windows partition is skipped
         print("tapkich restore windows: needs mtools and ntfsprogs to read the disks: sudo pacman -S mtools ntfsprogs",
               file=sys.stderr)
+        return 1
+    if not os.path.isdir("/sys/firmware/efi"):    # efibootmgr has nothing to read or write without UEFI
+        print("tapkich restore windows: this computer started in legacy BIOS mode, so there is no firmware boot "
+              "list to restore.", file=sys.stderr)
         return 1
     snap = detect.detect_system()
     return restore(snap, **opts, ask=_ask)
