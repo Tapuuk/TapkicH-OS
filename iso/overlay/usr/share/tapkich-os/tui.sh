@@ -29,16 +29,23 @@ ui_select() {
   local -a items=("$@") order=() sel=()
   local n=${#items[@]} cur=0 top=0 i key rest hint="" lines
   local h=$(( n < 10 ? n : 10 ))
+  # Every drawn line must fit the terminal: a wrapped line makes the block taller than the cursor-up count and the menu smears.
+  local cols maxw; cols=$(stty size 2>/dev/null </dev/tty | awk '{print $2}'); ((${cols:-0} >= 30)) || cols=80
+  maxw=$(( cols - TUI_PAD - 1 ))
   local pad; printf -v pad '%*s' "$TUI_PAD" ''
   local -a risky=() sep=(); for i in $UI_RISKY; do risky[i]=1; done; for i in $UI_SEP; do sep[i]=1; done
   for ((i = 0; i < n; i++)); do sel[i]=0; done
   UI_PICKED=(); UI_PICKED_IDX=()
   lines=$(( h + 3 ))
 
+  _ui_hint() {
+    local t=${hint:-SPACE select   ENTER continue   ESC back   UP/DOWN move$( ((n > h)) && echo "   type a letter to jump")}
+    printf %s "${t:0:maxw}"
+  }
   _ui_draw() {
     local first=${1:-0} j idx mark style cursor
     ((first)) || printf '\e[%dA' "$lines"
-    printf '\e[2K\r%s\e[%sm%s\e[0m\n' "$pad" "$TUI_HEAD" "$header"
+    printf '\e[2K\r%s\e[%sm%s\e[0m\n' "$pad" "$TUI_HEAD" "${header:0:maxw}"
     for ((j = 0; j < h; j++)); do
       idx=$((top + j))
       if ((${sep[idx]:-0})); then printf '\e[2K\r\n'; continue; fi
@@ -57,14 +64,14 @@ ui_select() {
       elif ((idx == cur)); then style=$TUI_ACCENT
       elif ((sel[idx])); then style=$TUI_SEL
       else style=$TUI_BODY; fi
-      printf '\e[2K\r%s\e[%sm%s %s %s\e[0m\n' "$pad" "$style" "$cursor" "$mark" "${items[idx]}"
+      printf '\e[2K\r%s\e[%sm%s %s %s\e[0m\n' "$pad" "$style" "$cursor" "$mark" "${items[idx]:0:maxw-6}"
     done
     if ((n > h)); then
       printf '\e[2K\r%s\e[%sm  (%d-%d of %d)\e[0m\n' "$pad" "$TUI_MUTED" $((top + 1)) $((top + h)) "$n"
     else
       printf '\e[2K\r\n'
     fi
-    printf '\e[2K\r%s\e[%sm%s\e[0m\n' "$pad" "$TUI_MUTED" "${hint:-SPACE select   ENTER continue   ESC back   UP/DOWN move$( ((n > h)) && echo '   type a letter to jump')}"
+    printf '\e[2K\r%s\e[%sm%s\e[0m\n' "$pad" "$TUI_MUTED" "$(_ui_hint)"
   }
 
   UI_EOF=0

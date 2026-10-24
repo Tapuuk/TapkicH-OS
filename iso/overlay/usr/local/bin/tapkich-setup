@@ -51,6 +51,9 @@ SNAP_ARGS=()
 [[ -n ${TAPKICH_SNAPSHOT:-} ]] && SNAP_ARGS=(--snapshot "$TAPKICH_SNAPSHOT")
 DRY=${TAPKICH_DRY:-0}
 ANSWERS=${TAPKICH_ANSWERS:-}
+LOGFILE=${TAPKICH_LOG:-/var/log/tapkich-os-install.log}      # (tests point these three at fake folders)
+SYSNET=${TAPKICH_SYSNET:-/sys/class/net}
+IWD_DIR=${TAPKICH_IWD_DIR:-/var/lib/iwd}
 PAD=4
 ROOT_GB=""
 
@@ -292,7 +295,7 @@ disk_form() {
   disk=$(answer disk)
   DISKS_JSON=$(tapkich-installer disks "${SNAP_ARGS[@]}") || abort "Could not scan disks."
   # keep a record of exactly what the installer saw, for troubleshooting ("why did it say empty?")
-  { echo "== detection $(date +%T)"; tapkich-installer detect "${SNAP_ARGS[@]}" 2>&1 | jq -c . 2>/dev/null; } >> /var/log/tapkich-os-install.log 2>/dev/null || true
+  { echo "== detection $(date +%T)"; tapkich-installer detect "${SNAP_ARGS[@]}" 2>&1 | jq -c . 2>/dev/null; } >> "$LOGFILE" 2>/dev/null || true
   [[ -n $disk ]] && return 3
   logo
   local -a labels
@@ -483,7 +486,7 @@ size_form() {
 
 net_wired_cards() {                    # every wired network card (with or without a cable)
   local d
-  for d in /sys/class/net/*; do
+  for d in "$SYSNET"/*; do
     [[ -e $d/device && ! -e $d/wireless && ! -e $d/phy80211 ]] || continue
     [[ $(cat "$d/type" 2>/dev/null) == 1 ]] && basename "$d"
   done
@@ -494,7 +497,7 @@ net_ethernet() {                       # wired cards that have a cable plugged i
   for n in $(net_wired_cards); do
     ip link set "$n" up 2>/dev/null || true             # the cable state can only be read while the card is switched on
     for ((i = 0; i < 8; i++)); do
-      [[ $(cat "/sys/class/net/$n/carrier" 2>/dev/null) == 1 ]] && { echo "$n"; continue 2; }
+      [[ $(cat "$SYSNET/$n/carrier" 2>/dev/null) == 1 ]] && { echo "$n"; continue 2; }
       sleep 0.5
     done
   done
@@ -502,7 +505,7 @@ net_ethernet() {                       # wired cards that have a cable plugged i
 
 net_wifi_dev() {                       # name of the first Wi-Fi adapter, if there is one
   local d
-  for d in /sys/class/net/*; do
+  for d in "$SYSNET"/*; do
     [[ -e $d/wireless || -e $d/phy80211 ]] && { basename "$d"; return 0; }
   done
   return 1
@@ -521,14 +524,14 @@ wifi_connect() {
   local dev=$1 ssid=$2 pw=$3 hidden=${4:-0} fname ext i
   if [[ $ssid =~ ^[A-Za-z0-9_\ -]+$ ]]; then fname=$ssid
   else fname="=$(printf %s "$ssid" | od -An -tx1 | tr -d ' \n')"; fi          # iwd's file name rule for other characters
-  rm -f "/var/lib/iwd/$fname.psk" "/var/lib/iwd/$fname.open"
-  mkdir -p /var/lib/iwd
+  rm -f "$IWD_DIR/$fname.psk" "$IWD_DIR/$fname.open"
+  mkdir -p "$IWD_DIR"
   if [[ -n $pw ]]; then
     # iwd: an 8-63 character passphrase is `Passphrase=`; the 64-digit hex key is the finished key, `PreSharedKey=`
     local keyname=Passphrase; [[ $pw =~ ^[0-9a-fA-F]{64}$ ]] && keyname=PreSharedKey
-    ( umask 077; printf '[Security]\n%s=%s\n' "$keyname" "$pw" > "/var/lib/iwd/$fname.psk" )
+    ( umask 077; printf '[Security]\n%s=%s\n' "$keyname" "$pw" > "$IWD_DIR/$fname.psk" )
   else
-    ( umask 077; : > "/var/lib/iwd/$fname.open" )
+    ( umask 077; : > "$IWD_DIR/$fname.open" )
   fi
   rfkill unblock wifi 2>/dev/null || true
   if ((hidden)); then iwctl station "$dev" connect-hidden "$ssid" >/dev/null 2>&1
@@ -538,7 +541,7 @@ wifi_connect() {
     iwctl station "$dev" show 2>/dev/null | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -Eq 'State +connected' && return 0
     sleep 1
   done
-  rm -f "/var/lib/iwd/$fname.psk" "/var/lib/iwd/$fname.open"                     # wrong password: do not keep it
+  rm -f "$IWD_DIR/$fname.psk" "$IWD_DIR/$fname.open"                     # wrong password: do not keep it
   return 1
 }
 
@@ -754,6 +757,7 @@ install_system() {
     hint "(TAPKICH_DRY=1 is set: rehearsal only.)"
     return 0
   fi
+  INSTALL_RAN=1                                    # (from here on a signal is not "nothing was changed")
   local args=(apply --disk "$disk" --mode "$mode" --fs "${fs:-ext4}" --i-have-confirmed --progress)
   ((${ENCRYPT:-0})) && args+=(--encrypt)
   local o
@@ -799,7 +803,7 @@ install_system() {
     else
       out=$line
     fi
-  done < <(tapkich-installer "${args[@]}" 2>>/var/log/tapkich-os-install.log)
+  done < <(tapkich-installer "${args[@]}" 2>>"$LOGFILE")
   trap - INT HUP TERM; [[ -n $old_traps ]] && eval "$old_traps"
   ((tty)) && { printf '\e[?25h'; echo; }
   if [[ -n $SAVED_TTY ]]; then                      # give the terminal back, and throw away whatever was typed meanwhile
@@ -807,7 +811,7 @@ install_system() {
     while IFS= read -rs -t 0.05 -n 1000 _junk; do :; done
   fi
   if [[ -z $out ]]; then
-    out=$(jq -n --arg m "The installer stopped unexpectedly. The log is at /var/log/tapkich-os-install.log: $(tail -n 4 /var/log/tapkich-os-install.log 2>/dev/null | tr '\n' ' ')" \
+    out=$(jq -n --arg m "The installer stopped unexpectedly. The log is at /var/log/tapkich-os-install.log: $(tail -n 4 "$LOGFILE" 2>/dev/null | tr '\n' ' ')" \
       '{ok:false,code:"CRASH",message:$m}')
   fi
   if [[ $(jq -r .ok <<<"$out") == true ]]; then
@@ -816,7 +820,7 @@ install_system() {
     while IFS= read -r note; do [[ -n $note ]] && body "$note"; done < <(jq -r '.notes[]?' <<<"$out")
     hint "Backup of the old disk layout: $(jq -r .backup_dir <<<"$out")"
     hint "Remove the install USB/ISO, then reboot. TapkicH-OS starts from its own boot menu."
-    echo "TAPKICH-INSTALL-OK $out" >> /var/log/tapkich-os-install.log
+    echo "TAPKICH-INSTALL-OK $out" >> "$LOGFILE"
     # tests and unattended runs read the marker from the console; a person at the keyboard does not need the raw data
     if [[ -n $ANSWERS || ! -t 1 ]]; then echo "TAPKICH-INSTALL-OK $out"
     else
@@ -848,6 +852,16 @@ install_system() {
   fi
 }
 
+
+# Ctrl-C / hang-up / terminate on a question screen: give the terminal back (the menus hide the cursor) and leave.
+# (While the install itself runs these signals are handled in install_system.)
+cancel_on_signal() {
+  printf '\e[?25h'; stty sane 2>/dev/null
+  echo
+  [[ -n ${INSTALL_RAN:-} ]] || warn "Installation cancelled. Nothing was changed."
+  exit 130
+}
+trap cancel_on_signal INT TERM HUP
 
 # ---------- main ----------
 
@@ -897,3 +911,4 @@ while ((step < ${#STEPS[@]})); do
   fi
 done
 install_system
+exit 0
