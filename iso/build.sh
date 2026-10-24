@@ -31,5 +31,5 @@ name=$(basename "$iso" .iso)
 # Keep the ISO on the Linux filesystem (copying 1.6 GB over /mnt/c can run out of memory in WSL).
 mkdir -p "$WORK/iso"
 cp "$iso" "$WORK/iso/$name.iso"
-git -C "$REPO" rev-parse HEAD > "$WORK/iso/$name.commit"       # read by tools/publish-iso.sh
+cp "$WORK/profile/airootfs/usr/share/tapkich-os/build-commit" "$WORK/iso/$name.commit"       # the stamp inside the ISO (incl. -dirty), read by tools/publish-iso.sh
 echo "ISO: $WORK/iso/$name.iso"

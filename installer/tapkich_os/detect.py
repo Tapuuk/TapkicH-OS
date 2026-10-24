@@ -325,19 +325,31 @@ _SKIP_DEVICE = re.compile(r"^(loop|ram|zram|sr|fd|nbd|dm-)|^mmcblk\d+(boot\d+|rp
 
 def raid_member_reason(name: str, sysblock: str = "/sys/block", run=_run) -> str:
     """Why the whole disk `name` (e.g. "sda") is a member of a RAID set, or "" for a normal disk. Writing one member
-    can break the array (Intel RST / mdraid, which often holds Windows). Two signs: something holds the disk in
-    /sys/block/<d>/holders (md, device-mapper), or the RAID metadata on it (blkid TYPE ending in _raid_member)."""
-    try:
-        holders = sorted(os.listdir(f"{sysblock}/{name}/holders"))
-    except OSError:
-        holders = []
-    if holders:
-        return f"in use by {', '.join(holders)}"
+    can break the array (Intel RST / mdraid, which often holds Windows). Two signs: an md device holds the disk in
+    /sys/block/<d>/holders, or the RAID metadata on it (blkid TYPE ending in _raid_member). Other holders (LUKS / LVM
+    opened on the whole disk) are not RAID: see `in_use_reason`."""
+    md = [h for h in disk_holders(name, sysblock) if h.startswith("md")]
+    if md:
+        return f"in use by {', '.join(md)}"
     try:
         fstype = run(["blkid", "-p", "-s", "TYPE", "-o", "value", f"/dev/{name}"]).stdout.strip()
     except OSError:
         return ""
     return f"{fstype} metadata" if fstype.endswith("_raid_member") else ""
+
+
+def disk_holders(name: str, sysblock: str = "/sys/block") -> list:
+    """What holds the whole disk `name` open (/sys/block/<d>/holders): md0, dm-0, ..."""
+    try:
+        return sorted(os.listdir(f"{sysblock}/{name}/holders"))
+    except OSError:
+        return []
+
+
+def in_use_reason(name: str, sysblock: str = "/sys/block") -> str:
+    """"in use by dm-0" when something other than RAID (md) holds the whole disk, else ""."""
+    other = [h for h in disk_holders(name, sysblock) if not h.startswith("md")]
+    return f"in use by {', '.join(other)}" if other else ""
 
 
 def detect_system() -> Snapshot:
@@ -359,6 +371,7 @@ def detect_system() -> Snapshot:
             continue
         d.installer_media = path in installer
         d.raid_member = raid_member_reason(name)
+        d.in_use = "" if d.raid_member else in_use_reason(name)
         for attr in ("model", "serial"):
             f = f"/sys/block/{name}/device/{attr}"
             if os.path.exists(f):
@@ -371,7 +384,7 @@ def detect_system() -> Snapshot:
         print("detect: skipped unreadable devices: " + "; ".join(skipped), file=sys.stderr)
     nv = _run(["efibootmgr", "-v"]).stdout if shutil.which("efibootmgr") else ""
     fw = Firmware(uefi=os.path.isdir("/sys/firmware/efi"), secure_boot=_secure_boot(), rst_raid=rst_raid_mode())
-    return Snapshot(disks=disks, nvram=parse_efibootmgr(nv), firmware=fw)
+    return Snapshot(disks=disks, nvram=parse_efibootmgr(nv), firmware=fw, skipped=skipped)
 
 
 # Intel storage controllers in RAID / "Intel RST" mode: PCI class 01:04 (RAID bus controller), and Intel VMD (Volume

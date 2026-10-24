@@ -71,15 +71,30 @@ def has_entry(nvram: list, part) -> bool:
 
 def other_entries(nvram: list, part) -> list:
     """Entries with exactly our label that do not point at `part`: Limine finds the entry by name, so they clash."""
-    mine = part.partuuid.lower() if part.partuuid else None
+    mine = part.partuuid.lower() if part is not None and part.partuuid else None
     return [e for e in nvram if e.label == LABEL and e.partuuid != mine]
 
 
 def stale_entries(nvram: list, part, snap) -> list:
     """Of those, the ones whose partition no longer exists on any disk. Never one with an unknown target, never one
-    whose partition is still there, never one with another name."""
+    whose partition is still there, never one with another name. `part` is None when no Windows partition is left."""
     return [e for e in other_entries(nvram, part)
             if e.label == LABEL and e.partuuid and snap.find_partuuid(e.partuuid) is None]
+
+
+def describe_entry(e) -> str:
+    """One stale entry, with everything the firmware knows about its target, so the user can judge it."""
+    return f"Boot{e.bootnum}  {e.label}  partition {e.partuuid}  file {e.path or '(none)'}"
+
+
+def skipped_refusal(snap) -> str:
+    """Why nothing may be deleted: detection could not read some devices, so a partition that looks gone might sit
+    on one of them. '' when the picture is complete."""
+    skipped = list(getattr(snap, "skipped", None) or [])
+    if not skipped:
+        return ""
+    return ("Some devices could not be read, so an entry that looks stale might point at one of them. Nothing was "
+            "removed. Unreadable: " + "; ".join(skipped))
 
 
 def remove_command(entry) -> list:
@@ -128,13 +143,39 @@ def restore(snap, *, disk="", part=0, check=False, yes=False, remove_stale=False
             say=print) -> int:
     """Returns the exit code. `run(cmd) -> stdout` and `ask(question) -> bool` are replaced in tests."""
     try:
-        target = pick_target(windows_partitions(snap), disk, part)
+        parts = windows_partitions(snap)
+        if not parts and not remove_stale:
+            pick_target(parts)                         # raises: nothing to restore
+        target = pick_target(parts, disk, part) if parts else None
         nvram, order = _read_list(run)
         stale = stale_entries(nvram, target, snap)
+        if target is None:                             # the Windows disk is gone: the only job is the stale entries
+            if not stale:
+                say(f'No Windows boot files found on any disk, and no "{LABEL}" entry points at a missing partition.')
+                return 1
+            if (why := skipped_refusal(snap)):
+                say(why)
+                return 1
+            say(f'No Windows boot files found on any disk. These "{LABEL}" boot entries point at a partition that '
+                "is gone:")
+            for e in stale:
+                say("  " + describe_entry(e))
+            if check:
+                return 1
+            if not yes and not (ask and ask("Remove them? [y/N] ")):
+                say("Nothing changed.")
+                return 1
+            for e in stale:
+                run(remove_command(e))
+            say("Removed.")
+            return 0
         if remove_stale and stale:
+            if (why := skipped_refusal(snap)):
+                say(why)
+                return 1
             say(f'These "{LABEL}" boot entries point at a partition that is gone:')
             for e in stale:
-                say(f"  Boot{e.bootnum}  ({e.partuuid})")
+                say("  " + describe_entry(e))
             if check:
                 return 1
             if not yes and not (ask and ask("Remove them? [y/N] ")):

@@ -666,8 +666,6 @@ class SystemInstaller:
         local_clock = self._windows_stays()
         write_clock = True
         if local_clock:
-            self.notes.append("Windows is on this computer, so the hardware clock keeps local time (as Windows "
-                              "expects); both systems show the same time.")
             # The live system's clock is only right if it was synchronised. If not, writing it to the hardware clock
             # would set Windows' time wrong: leave the clock alone, and only tell the new system it is local time.
             ntp = self.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], check=False)
@@ -677,6 +675,9 @@ class SystemInstaller:
                     f.write("0.0 0 0\n0\nLOCAL\n")
                 self.notes.append("This computer's clock could not be checked during the install (no internet time), "
                                   "so the hardware clock was left alone. Check the date and time in Windows.")
+            else:
+                self.notes.append("Windows is on this computer, so the hardware clock keeps local time (as Windows "
+                                  "expects); both systems show the same time.")
         for db in ("passwd", "group"):                  # a name the new system already uses would fail useradd late
             taken = self.run(["arch-chroot", self.mnt, "getent", db, a.username], check=False)
             if (taken.stdout or "").strip():
@@ -750,7 +751,7 @@ class SystemInstaller:
                     self.progress.log(f"WARNING: not enough free space on the new system for {pkg} "
                                       f"(needs {need // 2 ** 30} GiB); skipped")
                     self.notes.append(f"{name} was not installed: the disk is too full for it. Free some space, then "
-                                      f"run `{apps.retry_hint(pkg)}`.")
+                                      f"run `{apps.retry_hint(pkg)}`{apps.RETRY_ALT.get(pkg, '')}.")
                     step.at(1, msg, "skipped, not enough space")
                     continue
                 self.progress.log(f"aur: installing {pkg}")
@@ -767,7 +768,7 @@ class SystemInstaller:
                     self.progress.log(f"WARNING: {label} could not be installed ({pkg}); continuing. "
                                       f"Last output: {' | '.join(tail[-5:])!r}")
                     self.notes.append(f"{name} could not be installed during the install. When the computer is online, "
-                                      f"run `{apps.retry_hint(pkg)}`.")
+                                      f"run `{apps.retry_hint(pkg)}`{apps.RETRY_ALT.get(pkg, '')}.")
                     for fb in fallback:
                         step.at(0.9, msg, f"falling back to {fb}")
                         self.run(["arch-chroot", self.mnt, "pacman", "-S", "--noconfirm", "--needed", fb], check=False)
@@ -946,14 +947,20 @@ class SystemInstaller:
             finished.set()
             if timer:
                 timer.cancel()
-            self._signal_group(p, signal.SIGTERM)
             try:
+                self._signal_group(p, signal.SIGTERM)
                 p.wait(timeout=self.KILL_GRACE)
-            except subprocess.TimeoutExpired:
+            except BaseException:                      # grace over, or a second Ctrl-C / SIGTERM during it: carry on
                 pass
-            self._signal_group(p, signal.SIGKILL)
-            p.wait()
-            self._remove_stale_pacman_lock()
+            finally:                                   # on every path: kill the group, reap it, drop the lock
+                while True:
+                    try:
+                        self._signal_group(p, signal.SIGKILL)
+                        p.wait()
+                        break
+                    except BaseException:
+                        continue
+                self._remove_stale_pacman_lock()
             raise
         finally:
             finished.set()

@@ -101,10 +101,11 @@ SUDO_INSTALL_FILE = "/etc/sudoers.d/99-tapkich-install"
 SUDO_INSTALL_RULE = "%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n"
 
 
+RETRY_ALT = {"proton-ge-custom-bin": " (or install Proton-GE from ProtonUp-Qt)"}     # text for the note, not a command
+
+
 def retry_hint(pkg: str) -> str:
-    """What to run later, on the installed system, for an AUR app that did not install."""
-    if pkg == "proton-ge-custom-bin":
-        return "paru -S proton-ge-custom-bin (or install Proton-GE from ProtonUp-Qt)"
+    """The shell command to run later, on the installed system, for an AUR app that did not install."""
     return f"paru -S {pkg}"
 
 

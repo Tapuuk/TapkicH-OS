@@ -234,6 +234,11 @@ def plan(snap: Snapshot, choices: Choices) -> Plan:
             "storage mode to AHCI in the firmware, let Windows start once (Safe Mode), run `bcdedit /deletevalue "
             "{current} safeboot`, restart, then install.",
         )
+    if target.in_use:
+        raise HardStop(
+            "DISK_IN_USE",
+            f"{target.id} is {target.in_use}. Close it (cryptsetup close / vgchange -an) and start again.",
+        )
     if target.table == "hybrid":
         raise HardStop(
             "HYBRID_MBR",

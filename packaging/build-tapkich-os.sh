@@ -16,7 +16,7 @@ if [[ ${TAPKICH_RELEASE:-0} == 1 ]]; then
   [[ $(git rev-parse HEAD) == $(git rev-parse origin/main) ]] || { echo "release build refused: HEAD is not origin/main (push the commit first)"; exit 1; }
 fi
 ver="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d.%H%M).g$(git rev-parse --short HEAD)"   # UTC date of the commit: newer commits sort newer (also after the history rewrite of 2026-10-24)
-[[ -n $(git status --porcelain -- installer packaging LICENSE 2>/dev/null) ]] && ver="$ver.d$(date +%Y%m%d%H%M)"
+[[ -n $(git status --porcelain -- installer packaging LICENSE 2>/dev/null) ]] && ver="$ver.d$(date -u +%Y%m%d%H%M)"
 WORK=/var/tmp/tapkich-os-pkg
 rm -rf "$WORK"; mkdir -p "$WORK/src"
 # a clean copy the build user can read (no __pycache__)

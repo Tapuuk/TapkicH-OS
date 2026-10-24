@@ -71,6 +71,7 @@ class Disk:
     last_usable: int = 0
     raw_fs: str = ""               # a file system written straight onto the disk, with no partition table
     raid_member: str = ""          # why this disk belongs to a RAID / device-mapper set ("" = it does not)
+    in_use: str = ""               # what holds the whole disk open without being RAID (LUKS / LVM: "in use by dm-0")
     partitions: list = field(default_factory=list)
 
     def free_regions(self, min_size: int = 1 * MIB):
@@ -111,6 +112,7 @@ class Snapshot:
     disks: list
     nvram: list = field(default_factory=list)
     firmware: Firmware = field(default_factory=Firmware)
+    skipped: list = field(default_factory=list)    # devices detection could not read ("/dev/x: why"): the picture is incomplete
 
     def disk(self, disk_id: str) -> Disk:
         for d in self.disks:
@@ -144,4 +146,5 @@ class Snapshot:
             disks=disks,
             nvram=[NvramEntry(**n) for n in raw.get("nvram", [])],
             firmware=Firmware(**raw.get("firmware", {})),
+            skipped=list(raw.get("skipped", [])),
         )

@@ -94,9 +94,21 @@ def with_repo(pacman_conf: str, include: str = REPO_INCLUDE) -> str:
 
 
 def without_repo(pacman_conf: str, include: str = REPO_INCLUDE) -> str:
-    """pacman.conf without the exact [tapkich] block `with_repo` writes. Idempotent; touches nothing else."""
-    out = re.sub(rf"\n*^\[{REPO_NAME}\]\nInclude = {re.escape(include)}\n?", "\n", pacman_conf, flags=re.M)
-    return out.rstrip("\n") + "\n"
+    """pacman.conf without the [tapkich] section, whatever it holds (a hand-edited SigLevel or Server line too): from
+    its header up to the next [section] header or the end. Idempotent; the other sections and comments stay."""
+    out, skipping = [], False
+    for line in pacman_conf.split("\n"):
+        if re.match(rf"^\[{REPO_NAME}\]", line):
+            skipping = True
+            while out and not out[-1].strip():          # the blank lines that set the section apart
+                out.pop()
+            continue
+        if skipping and re.match(r"^\[", line):
+            skipping = False
+            out.append("")
+        if not skipping:
+            out.append(line)
+    return "\n".join(out).rstrip("\n") + "\n"
 
 
 def has_repo(pacman_conf: str) -> bool:
@@ -238,7 +250,11 @@ def channel_step(conf: dict, pacman_conf_path: str = PACMAN_CONF, probe_fn=None,
     if conf["enabled"] == "no":
         s.note = f"switched off in {CONF}"
         if configured:
-            if write(pacman_conf_path, without_repo(current)):
+            new = without_repo(current)
+            if has_repo(new):
+                s.result, s.skip_repo = "failed", True
+                s.note += "; the [tapkich] section could not be removed from pacman.conf"
+            elif write(pacman_conf_path, new):
                 s.note += "; the repository was removed from pacman.conf"
             else:
                 s.skip_repo = True
@@ -289,16 +305,26 @@ def _refresh_sudo() -> None:
 
 def temp_pacman_conf() -> str:
     """A copy of pacman.conf without the [tapkich] block, for this run only. Returns its path ('' if it failed)."""
+    path = ""
     try:
         with open(PACMAN_CONF) as f:
             text = without_repo(f.read())
+        if has_repo(text):
+            return ""
         fd, path = tempfile.mkstemp(prefix="tapkich-pacman-", suffix=".conf")
         with os.fdopen(fd, "w") as f:
             f.write(text)
         os.chmod(path, 0o644)
-        return path
+        done, path = path, ""
+        return done
     except OSError:
         return ""
+    finally:
+        if path:                                       # failed half way: do not leave the file behind
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def main(argv=None) -> int:
@@ -319,24 +345,26 @@ def main(argv=None) -> int:
     _head("System packages (pacman)")
     s = Step("System packages")
     config = temp_pacman_conf() if ch.skip_repo else ""
-    if ch.skip_repo and not config:
-        s.result, s.note = "failed", "could not prepare pacman's configuration without the TapkicH-OS repository"
-        _say("  " + s.note)
-    else:
-        # the keyring step and the full upgrade belong together (-Sy alone is a partial upgrade); a failed keyring step
-        # does not stop the upgrade
-        krc = _run(_sudo(keyring_command(config) + (["--noconfirm"] if yes else [])))
-        if krc != 0:
-            _say("  the signing keys could not be refreshed first; continuing with the upgrade")
-        rc = _run(_sudo(pacman_command(adopt=ch.result == "ok" and not _installed(PACKAGE), config=config)
-                        + (["--noconfirm"] if yes else [])))
-        s.result = "ok" if rc == 0 else "failed"
+    try:
+        if ch.skip_repo and not config:
+            s.result, s.note = "failed", "could not prepare pacman's configuration without the TapkicH-OS repository"
+            _say("  " + s.note)
+        else:
+            # the keyring step and the full upgrade belong together (-Sy alone is a partial upgrade); a failed keyring
+            # step does not stop the upgrade
+            krc = _run(_sudo(keyring_command(config) + (["--noconfirm"] if yes else [])))
+            if krc != 0:
+                _say("  the signing keys could not be refreshed first; continuing with the upgrade")
+            rc = _run(_sudo(pacman_command(adopt=ch.result == "ok" and not _installed(PACKAGE), config=config)
+                            + (["--noconfirm"] if yes else [])))
+            s.result = "ok" if rc == 0 else "failed"
+    finally:
+        if config:                                     # also after Ctrl-C
+            try:
+                os.unlink(config)
+            except OSError:
+                pass
     steps.append(s)
-    if config:
-        try:
-            os.unlink(config)
-        except OSError:
-            pass
 
     _head("Shell packages (rebuilt after a Qt update)")
     steps.append(qt_step(yes))
