@@ -235,9 +235,14 @@ def install(args: list, home: str | None = None, run=subprocess.run, urlopen=url
     if not args:
         out(usage_text())
         return 0
-    if len(args) == 1:
-        args = [ALIASES.get(args[0], args[0])]
-    if len(args) != 1 or args[0] not in BY_NAME:
+    if args[0] in ("-h", "--help", "help"):
+        out(usage_text())
+        return 0
+    if len(args) > 1:
+        out("tapkich install: one app at a time, with no options: tapkich install <name>\n\n" + usage_text())
+        return 2
+    args = [ALIASES.get(args[0], args[0])]
+    if args[0] not in BY_NAME:
         out(f"tapkich install: unknown app {' '.join(args)!r}\n\n" + usage_text())
         return 2
     app = BY_NAME[args[0]]
