@@ -1,0 +1,893 @@
+#!/usr/bin/env bash
+# TapkicH-OS configurator: the simple, guided installer.
+#
+# Flow: keyboard -> user -> disk -> install mode -> space (GB) -> plan + Windows check -> review -> install.
+# All disk safety decisions come from `tapkich-installer` (detect/plan/apply); this script only asks and shows.
+# Keys everywhere: UP/DOWN move, SPACE select, ENTER continue, ESC cancel (see tui.sh).
+#
+# Unattended / testing:  TAPKICH_ANSWERS=/path/answers.json  (keys: keyboard xkb username password hostname
+#   timezone disk mode root_gb overrides[] selftest) skips the forms.  TAPKICH_SNAPSHOT=/path/snapshot.json
+#   uses a saved machine snapshot instead of scanning disks.  TAPKICH_DRY=1 never writes to disk.
+#   TAPKICH_PARTITION_ONLY=1 partitions but does not install the system (tests only).
+set -uo pipefail
+
+PALETTE=${TAPKICH_PALETTE:-/usr/share/tapkich-os/palette.sh}
+# shellcheck disable=SC1090
+[[ -f $PALETTE ]] && source "$PALETTE"
+
+# ---------- colours ----------
+# Brand: PRIMARY (violet) and SECONDARY (orchid). Red only for warnings and risky actions.
+# Text roles: header / subheader / body / hint / action / selected / risky (each a different shade).
+PRIMARY_HEX=${PRIMARY_HEX:-7c3aed};  SECONDARY_HEX=${SECONDARY_HEX:-c084fc}
+DANGER_HEX=${DANGER_HEX:-e5484d};    DANGER_BRIGHT_HEX=${DANGER_BRIGHT_HEX:-ff6b6b}
+HEADER_HEX=${HEADER_HEX:-eeedf2};    BODY_HEX=${BODY_HEX:-b4b1bd};   MUTED_HEX=${MUTED_HEX:-6e6b78}
+G_START=${G_START:-"124 58 237"};    G_END=${G_END:-"192 132 252"}
+
+rgb_sgr() { printf '38;2;%d;%d;%d' $((16#${1:0:2})) $((16#${1:2:2})) $((16#${1:4:2})); }
+
+if [[ $TERM == linux ]]; then
+  # The Linux console has 16 colours: reprogram palette slots to our shades, then use them by number.
+  printf '\e]P4%s\e]PC%s' "$PRIMARY_HEX" "$PRIMARY_HEX"          # violet
+  printf '\e]P5%s\e]PD%s' "$SECONDARY_HEX" "$SECONDARY_HEX"      # orchid
+  printf '\e]P1%s\e]P9%s' "$DANGER_HEX" "$DANGER_BRIGHT_HEX"     # red
+  printf '\e]P7%s\e]PF%s\e]P8%s' "$BODY_HEX" "$HEADER_HEX" "$MUTED_HEX"
+  S_HEAD='1;97'; S_SUB='34'; S_BODY='37'; S_MUTED='90'; S_ACT='1;35'; S_SEL='34'; S_RISK='1;91'
+  GUM_HEAD=4; GUM_ACCENT=5
+else
+  S_HEAD="1;$(rgb_sgr "$HEADER_HEX")"; S_SUB=$(rgb_sgr "$PRIMARY_HEX"); S_BODY=$(rgb_sgr "$BODY_HEX")
+  S_MUTED=$(rgb_sgr "$MUTED_HEX"); S_ACT="1;$(rgb_sgr "$SECONDARY_HEX")"; S_SEL=$(rgb_sgr "$PRIMARY_HEX")
+  S_RISK="1;$(rgb_sgr "$DANGER_BRIGHT_HEX")"
+  GUM_HEAD="#$PRIMARY_HEX"; GUM_ACCENT="#$SECONDARY_HEX"
+fi
+S_VIOLET=$S_SUB; S_ORCHID=$S_ACT
+
+export TUI_HEAD=$S_SUB TUI_BODY=$S_BODY TUI_MUTED=$S_MUTED TUI_ACCENT=$S_ACT TUI_SEL=$S_SEL TUI_RISK=$S_RISK
+TUI_LIB=${TAPKICH_TUI:-/usr/share/tapkich-os/tui.sh}
+# shellcheck disable=SC1090
+source "$TUI_LIB"
+export GUM_INPUT_CURSOR_FOREGROUND="$GUM_ACCENT" GUM_INPUT_PROMPT_FOREGROUND="$GUM_HEAD" GUM_SPIN_SPINNER_FOREGROUND="$GUM_ACCENT"
+
+SNAP_ARGS=()
+[[ -n ${TAPKICH_SNAPSHOT:-} ]] && SNAP_ARGS=(--snapshot "$TAPKICH_SNAPSHOT")
+DRY=${TAPKICH_DRY:-0}
+ANSWERS=${TAPKICH_ANSWERS:-}
+PAD=4
+ROOT_GB=""
+
+# ---------- text styles ----------
+# out <style> <text...>: prints (multi-line ok) with left padding in the given style.
+out() {
+  local style=$1 line; shift
+  while IFS= read -r line; do printf '%*s\e[%sm%s\e[0m\n' "$PAD" '' "$style" "$line"; done <<<"$*"
+}
+h1()   { out "$S_HEAD" "$@"; }        # header
+h2()   { out "$S_SUB" "$@"; }         # subheader / question
+body() { out "$S_BODY" "$@"; }        # description
+hint() { out "$S_MUTED" "$@"; }       # hints, fine print
+warn() { out "$S_RISK" "! $*"; }      # warnings and risky actions: red
+blank() { echo; }
+
+# Title block: violet "TAPKICH-", orchid "OS", tagline, then a rule separating it from the menu.
+logo() {
+  clear
+  echo
+  printf '%*s\e[%smT A P K I C H -\e[0m \e[%smO S\e[0m\n' "$PAD" '' "1;$S_VIOLET" "$S_ORCHID"
+  out "$S_BODY" "WORLD'S FIRST HYPRLAND GAMING + WORK DISTRO"
+  local cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)} w
+  w=$(( cols - 2 * PAD )); ((w > 72)) && w=72; ((w < 20)) && w=20
+  printf '%*s\e[%sm%s\e[0m\n' "$PAD" '' "$S_MUTED" "$(printf '%*s' "$w" '' | tr ' ' '_')"
+  echo
+}
+
+abort() {
+  echo
+  warn "${1:-Installation cancelled. Nothing was changed.}"
+  exit 1
+}
+
+answer() { [[ -n $ANSWERS ]] && jq -r --arg k "$1" '.[$k] // empty' "$ANSWERS"; }
+
+# ---------- steps ----------
+# Every step is its own screen: the title block, then ONLY that step's question. A step function returns
+#   0  done, go to the next step         2  the user went back (ESC / LEFT / BACKSPACE)
+#   3  nothing to ask (answered already / not needed): carry on in whichever direction we were going
+#   4  jump to the step named in GOTO (e.g. back to the disk list after the planner refused)
+
+# One line of text input on its own screen. Sets REPLY_TXT. Returns 0, or 2 when the user pressed ESC (back).
+#   ask_line <heading> <hint> <placeholder> [default] [--password]
+ask_line() {
+  local head=$1 hnt=$2 ph=$3 def=${4:-} pw=${5:-} v
+  logo
+  h2 "$head"
+  [[ -n $hnt ]] && hint "$hnt"
+  hint "ENTER continue   ESC back"
+  blank
+  if [[ $pw == --password ]]; then v=$(gum input --password --placeholder "$ph" --prompt "  > ") || return 2
+  else v=$(gum input --value "$def" --placeholder "$ph" --prompt "  > ") || return 2; fi
+  REPLY_TXT=$v
+}
+
+# System language (one of 18). Sets the locale of the installed system; the installer itself stays in English.
+language_form() {
+  locale=$(answer locale); font=$(answer font)
+  [[ -n $locale ]] && return 3
+  [[ -n $ANSWERS ]] && { locale=en_US; return 3; }        # unattended: default to English
+  local tsv=${TAPKICH_LANGUAGES:-/usr/share/tapkich-os/languages.tsv}
+  local -a labels=() locales=() fonts=()
+  local label loc fnt
+  while IFS=$'\t' read -r label loc fnt; do
+    [[ -n $label ]] && { labels+=("$label"); locales+=("$loc"); fonts+=("$fnt"); }
+  done < "$tsv"
+  logo
+  hint "This is the language of the installed system (menus, messages, dates)."
+  blank
+  ui_select one "Which language should the system use?" "${labels[@]}" || return 2
+  locale=${locales[${UI_PICKED_IDX[0]}]}
+  font=${fonts[${UI_PICKED_IDX[0]}]}
+}
+
+# Keyboard shortcuts on the desktop: TapkicH-OS's keys (default) or Caelestia's own, untouched.
+shortcuts_form() {
+  keybinds=$(answer keybinds)
+  [[ -n $keybinds ]] && return 3
+  [[ -n $ANSWERS ]] && { keybinds=tapkich; return 3; }      # unattended: our keys
+  logo
+  hint "SUPER is the Windows key. Every key can be changed later in ~/.config/caelestia."
+  blank
+  ui_select one "Which keyboard shortcuts do you want?" \
+    "TapkicH-OS keys (SUPER+R search, SUPER+Q terminal, SUPER+W close)" \
+    "Caelestia's own keys, unchanged" || return 2
+  if [[ ${UI_PICKED_IDX[0]} == 0 ]]; then keybinds=tapkich; else keybinds=caelestia; fi
+}
+
+# Secure Boot. Keys can only be enrolled while the firmware is in Setup Mode, so the question is asked only
+# then; otherwise the review screen says how to do it later. (The live ISO itself only starts with Secure Boot off.)
+EFIVARS=${TAPKICH_EFIVARS:-/sys/firmware/efi/efivars}     # (tests point this at a fake folder)
+efivar_byte() { local f; f=$(ls "$EFIVARS/$1"-8be4df61-* 2>/dev/null | head -1); [[ -n $f ]] && od -An -tu1 -j4 -N1 "$f" | tr -d ' '; }
+SB_SETUP_MODE=0
+[[ $(efivar_byte SetupMode) == 1 ]] && SB_SETUP_MODE=1
+secureboot_form() {
+  secure_boot=$(answer secure_boot)
+  [[ -n $secure_boot ]] && return 3
+  if [[ -n $ANSWERS || $SB_SETUP_MODE != 1 ]]; then secure_boot=false; return 3; fi
+  logo
+  body "Your firmware is in Secure Boot Setup Mode: new keys can be added now."
+  hint "TapkicH-OS creates its own keys and enrolls them TOGETHER WITH Microsoft's, so Windows keeps starting."
+  hint "Limine and the kernel are signed; updates are signed automatically."
+  warn "Windows with BitLocker will ask for its recovery key once. Have it ready (account.microsoft.com/devices/recoverykey)."
+  blank
+  ui_select one "Set up Secure Boot?" "Yes, set up Secure Boot" "No, leave it off (possible later: tapkich secureboot setup)" || return 2
+  if [[ ${UI_PICKED_IDX[0]} == 0 ]]; then secure_boot=true; else secure_boot=false; fi
+}
+
+# Keyboards: pick one or more. The first one you pick is the main layout (console keymap + first XKB
+# layout); the others are added so you can switch between them later.
+keyboard_form() {
+  logo
+  keyboard=$(answer keyboard)
+  if [[ -n $keyboard ]]; then
+    xkb_layouts=$(answer xkb); xkb_layouts=${xkb_layouts:-$keyboard}
+    return 3
+  fi
+  local tsv=${TAPKICH_KEYBOARDS:-/usr/share/tapkich-os/keyboards.tsv}
+  local -a labels=() consoles=() xkbs=()
+  local label console xkb
+  while IFS=$'\t' read -r label console xkb; do
+    [[ -n $label ]] && { labels+=("$label"); consoles+=("$console"); xkbs+=("$xkb"); }
+  done < "$tsv"
+  hint "The first layout you pick is your main one. You can switch between them later."
+  blank
+  ui_select many "Which keyboard layouts do you use?" "${labels[@]}" || return 2
+  keyboard=${consoles[${UI_PICKED_IDX[0]}]}
+  xkb_layouts=""
+  local i
+  for i in "${UI_PICKED_IDX[@]}"; do
+    [[ ",$xkb_layouts," == *",${xkbs[i]},"* ]] && continue          # e.g. both Swiss layouts are `ch`: list it once
+    xkb_layouts+="${xkb_layouts:+,}${xkbs[i]}"
+  done
+  # A name and a host name need Latin letters: if no chosen layout can type them, `us` goes LAST (the main layout stays
+  # the first pick) and is also installed on the new system.
+  MAIN_NONLATIN=0
+  [[ $NONLATIN_XKB == *" ${xkbs[${UI_PICKED_IDX[0]}]} "* ]] && MAIN_NONLATIN=1
+  local latin=0
+  for i in "${UI_PICKED_IDX[@]}"; do [[ $NONLATIN_XKB == *" ${xkbs[i]} "* ]] || latin=1; done
+  ((latin)) || xkb_layouts+=",us"
+  keyboard_apply "$keyboard" "$xkb_layouts"
+}
+
+# xkb layouts that cannot type Latin letters (rs: its default is Cyrillic).
+NONLATIN_XKB=" ara am bd by ge gr il in ir kr kz mn mk ru rs th ua bg "
+MAIN_NONLATIN=0
+
+# Switch the keyboard now: the console keymap, and in the live ISO's kiosk Hyprland's layouts too.
+keyboard_apply() {
+  loadkeys "$1" 2>/dev/null || true
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    hyprctl eval "hl.config({ input = { kb_layout = \"$2\", kb_options = \"grp:alt_shift_toggle\" } })" >/dev/null 2>&1 || true
+  fi
+}
+
+# For the screens that need Latin letters (user name, computer name): type with the US layout, then switch back.
+latin_on()  { ((${MAIN_NONLATIN:-0})) && [[ -z $ANSWERS ]] && keyboard_apply us us; return 0; }
+latin_off() { ((${MAIN_NONLATIN:-0})) && [[ -z $ANSWERS ]] && keyboard_apply "$keyboard" "$xkb_layouts"; return 0; }
+latin_hint() { ((${MAIN_NONLATIN:-0})) && echo " This screen uses the US keyboard (Latin letters)."; }
+
+# Names of system accounts and groups: the same list as RESERVED_USERS in installer/tapkich_os/system.py (keep in sync).
+RESERVED_USERS=" root bin daemon mail ftp http nobody dbus uuidd dnsmasq rpc ntp avahi colord polkitd rtkit sddm git geoclue usbmux flatpak nm-openconnect nm-openvpn alpm tss games saned brltty cups wheel adm sys users gamemode "
+username_reserved() { [[ $RESERVED_USERS == *" $1 "* || $1 == systemd-* ]]; }
+
+username_form() { latin_on; username_screen; local rc=$?; latin_off; return $rc; }
+username_screen() {
+  local v; v=$(answer username)
+  [[ -n $v ]] && { username=$v; return 3; }
+  while true; do
+    ask_line "Who are you?" "Lowercase letters, numbers, - and _ only.$(latin_hint)" "username (lowercase)" "${username:-}" || return 2
+    v=$REPLY_TXT
+    if username_reserved "$v"; then
+      username=""; warn "\"$v\" is used by the system. Choose another name."; sleep 1.5; continue
+    fi
+    if [[ $v =~ ^[a-z_][a-z0-9_-]{0,30}$ ]]; then username=$v; return 0; fi
+    username=""
+    warn "Use lowercase letters, numbers, - and _ only."; sleep 1.5
+  done
+}
+
+password_form() {
+  local v; v=$(answer password)
+  [[ -n $v ]] && { password=$v; return 3; }
+  local pw confirm
+  while true; do
+    ask_line "Choose a password" "You use it to log in." "password" "" --password || return 2
+    pw=$REPLY_TXT
+    h2 "Repeat the password"
+    confirm=$(gum input --password --placeholder "repeat password" --prompt "  > ") || continue   # ESC: ask the first one again
+    if [[ -n $pw && $pw == "$confirm" ]]; then password=$pw; return 0; fi
+    warn "The passwords are empty or do not match. Try again."; sleep 1.5
+  done
+}
+
+hostname_form() { latin_on; hostname_screen; local rc=$?; latin_off; return $rc; }
+hostname_screen() {
+  local v; v=$(answer hostname)
+  [[ -n $v ]] && { hostname=$v; return 3; }
+  while true; do
+    ask_line "Name this computer" "This is how it shows up on your network.$(latin_hint)" "tapkich-os" "${hostname:-tapkich-os}" || return 2
+    v=$REPLY_TXT
+    if [[ $v =~ ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ ]]; then hostname=$v; return 0; fi
+    warn "Use lowercase letters, numbers and - only (not at the start or end)."; sleep 1.5
+  done
+}
+
+# Time zone, its own screen right after the network step (the guess needs the internet). The zone this computer seems
+# to be in (guessed from its internet address) is shown on top, a small gap below it, then every zone to scroll
+# through (type a letter to jump).
+timezone_form() {
+  timezone=$(answer timezone)
+  [[ -n $timezone ]] && return 3
+  if [[ -n $ANSWERS ]]; then timezone=UTC; return 3; fi
+  if [[ -z ${timezone_guess:-} ]]; then                      # (an empty guess is tried again each time the screen opens)
+    # Best-effort guess (this sends your IP address to ipapi.co). Accept it only if it is a real timezone name on this
+    # system (a captive-portal page or an error text must never end up as the timezone).
+    timezone_guess=$(curl -fsS --max-time 4 https://ipapi.co/timezone 2>/dev/null | head -c 64 | tr -d '\r\n')
+    [[ $timezone_guess =~ ^[A-Za-z0-9_+/-]+$ && -f /usr/share/zoneinfo/$timezone_guess ]] || timezone_guess=""
+  fi
+  local -a zones items
+  mapfile -t zones < <(timedatectl list-timezones 2>/dev/null)
+  ((${#zones[@]})) || mapfile -t zones < <(cd /usr/share/zoneinfo && find . -type f | sed 's|^\./||' | grep -E '^[A-Z][A-Za-z_]+/' | grep -vE '^(posix|right|SystemV)/' | sort)
+  local top="${timezone_guess:-UTC}" z
+  items=("${top}$([[ -n $timezone_guess ]] && echo '   (suggested for you)')" "")
+  for z in "${zones[@]}"; do [[ $z == "$top" ]] || items+=("$z"); done
+  logo
+  hint "Pick the time zone you are in. Type a letter to jump."
+  [[ -n $timezone_guess ]] && hint "The first one was guessed from your internet address."
+  blank
+  UI_SEP=1 ui_select one "Which time zone are you in?" "${items[@]}" || { UI_SEP=""; return 2; }
+  UI_SEP=""
+  if ((${UI_PICKED_IDX[0]} == 0)); then timezone=$top; else timezone=${UI_PICKED[0]}; fi
+}
+
+disk_form() {
+  # coming here always starts the disk choices from scratch
+  init_overrides; ROOT_GB=""; fs=ext4; ENCRYPT=0; DISK_PASSWORD=""
+  disk=$(answer disk)
+  DISKS_JSON=$(tapkich-installer disks "${SNAP_ARGS[@]}") || abort "Could not scan disks."
+  # keep a record of exactly what the installer saw, for troubleshooting ("why did it say empty?")
+  { echo "== detection $(date +%T)"; tapkich-installer detect "${SNAP_ARGS[@]}" 2>&1 | jq -c . 2>/dev/null; } >> /var/log/tapkich-os-install.log 2>/dev/null || true
+  [[ -n $disk ]] && return 3
+  logo
+  local -a labels
+  mapfile -t labels < <(jq -r '.[].label' <<<"$DISKS_JSON")
+  ((${#labels[@]})) || abort "No installable disks found."
+  hint "Nothing is changed until you confirm."
+  blank
+  ui_select one "Where should TapkicH-OS go?" "${labels[@]}" || return 2
+  disk=$(jq -r --argjson i "${UI_PICKED_IDX[0]}" '.[$i].id' <<<"$DISKS_JSON")
+}
+
+mode_form() {
+  mode=$(answer mode)
+  [[ -n $mode ]] && return 3
+  local info free prev table parts choices=() risky=""
+  info=$(jq -c --arg d "$disk" '.[] | select(.id == $d)' <<<"$DISKS_JSON")
+  free=$(jq -r '.free_gb' <<<"$info"); prev=$(jq -r '.has_previous_install' <<<"$info")
+  table=$(jq -r '.table' <<<"$info"); parts=$(jq -r '.partitions' <<<"$info")
+  # Free-space installs need an existing GPT disk (a blank disk with no table can only be used whole).
+  [[ $table == gpt ]] && choices+=("Use free space on this disk (${free} GB free, everything else stays)")
+  [[ $prev == true ]] && choices+=("Reinstall over the previous TapkicH-OS")
+  if ((parts == 0)); then
+    choices+=("Use the whole disk (nothing is on it)")                 # nothing to lose: not a risky action
+  else
+    choices+=("Erase this whole disk"); risky=$(( ${#choices[@]} - 1 ))
+  fi
+  logo
+  UI_RISKY=$risky ui_select one "How should it be installed on $disk?" "${choices[@]}" || return 2
+  case ${UI_PICKED[0]} in
+    "Use free space"*) mode=free_space ;;
+    Reinstall*) mode=reinstall ;;
+    *) mode=whole_disk ;;
+  esac
+}
+
+# Ask the planner. On a stop: explain, offer safe alternatives, and only continue when the user
+# types the exact override phrase. Returns 0 when a plan is approved, 1 to go back to disk choice.
+init_overrides() {                   # typed override phrases are kept in the global `overrides` (also passed to `apply`)
+  overrides=()
+  [[ -n $ANSWERS ]] && mapfile -t overrides < <(jq -r '.overrides[]? // empty' "$ANSWERS")
+}
+
+plan_form() {
+  while true; do
+    local args=(plan --disk "$disk" --mode "$mode" --fs "${fs:-ext4}" --json "${SNAP_ARGS[@]}")
+    ((${ENCRYPT:-0})) && args+=(--encrypt)
+    local o
+    for o in "${overrides[@]}"; do args+=(--override "$o"); done
+    [[ -n $ROOT_GB ]] && args+=(--root-gb "$ROOT_GB")
+    result=$(tapkich-installer "${args[@]}")
+    if [[ $(jq -r .ok <<<"$result") == true ]]; then return 0; fi
+
+    logo
+    warn "Stopped to protect your computer."
+    blank
+    body "$(jq -r .message <<<"$result" | fold -s -w 70)"
+    local alts; alts=$(jq -r '.alternatives[]? | "  - " + .' <<<"$result")
+    [[ -n $alts ]] && { blank; h2 "Safer choices"; body "$alts"; }
+    local phrase; phrase=$(jq -r '.override // empty' <<<"$result")
+    blank
+    if [[ -n $ANSWERS ]]; then abort "Unattended run stopped: $(jq -r .code <<<"$result")"; fi
+    if [[ -z $phrase ]]; then
+      ui_select one "What now?" "Choose another disk" "Quit" || return 1          # ESC: back to the disk list
+      [[ ${UI_PICKED_IDX[0]} == 1 ]] && abort
+      return 1
+    fi
+    UI_RISKY=1 ui_select one "What now?" "Choose another disk" "I really want to do this" || return 1
+    [[ ${UI_PICKED_IDX[0]} == 0 ]] && return 1
+    warn "This can destroy data. To continue, type exactly:  $phrase"
+    local typed; typed=$(gum input --prompt "  > ") || return 1
+    if [[ $typed == "$phrase" ]]; then overrides+=("$phrase"); else warn "That was not the exact phrase. Going back."; sleep 2; return 1; fi
+  done
+}
+
+# Silent step: ask the planner with the choices so far; if it stops, go back to the disk list.
+plan_step() {
+  plan_form && return 3
+  GOTO=disk_form; return 4
+}
+
+# Optional disk encryption (LUKS2). OFF by default. Three choices; turning it on needs an explicit "I understand".
+#   1. no (default)   2. yes, the disk password is your login password   3. yes, with a new (separate) password
+encrypt_form() {
+  if [[ -n $ANSWERS ]]; then
+    ENCRYPT=0; [[ $(answer encrypt) == true ]] && ENCRYPT=1
+    DISK_PASSWORD=$(answer disk_password); return 3
+  fi
+  local pick
+  while true; do
+    ENCRYPT=0; DISK_PASSWORD=""; DISK_NEW_PW=0
+    logo
+    hint "Encryption keeps your files private if the computer is lost or stolen. It is optional."
+    blank
+    ui_select one "Encrypt the disk?" "No (default)" "Yes, encrypt it with my login password" "Yes, encrypt it with a new password" || return 2
+    pick=${UI_PICKED_IDX[0]}
+    ((pick == 0)) && return 0
+    logo
+    warn "If you forget the disk password, ALL YOUR DATA ON THIS DISK IS LOST."
+    blank
+    body "There is no reset and no recovery: not for you, and not for anyone else."
+    if ((pick == 1)); then
+      body "Your login password is also your disk password. You type it every time the computer starts."
+    else
+      body "You will choose a separate disk password next. You type it every time the computer starts."
+    fi
+    body "Write it down somewhere safe."
+    blank
+    UI_RISKY=1 ui_select one "Do you understand?" "No, do not encrypt" "Yes, I understand: encrypt the disk" || continue   # ESC: back to the choice
+    [[ ${UI_PICKED_IDX[0]} == 1 ]] || return 0
+    ENCRYPT=1; ((pick == 2)) && DISK_NEW_PW=1
+    ((pick == 1)) && luks_password_note "$password"
+    return 0
+  done
+}
+
+# The disk password is typed at the very start of the computer, with the main console layout and none of the desktop's
+# layout switching: a password with non-ASCII characters (other alphabets) is easy to get wrong there. Warn, do not forbid.
+luks_password_note() {
+  [[ -z $ANSWERS && -n $(printf %s "$1" | LC_ALL=C tr -d '\000-\177') ]] || return 0
+  logo
+  warn "This disk password has characters that are not plain Latin letters, digits or symbols."
+  blank
+  body "At the start screen you type it with your main keyboard layout only (no switching)."
+  body "Plain Latin letters, digits and symbols are safer. Press ESC on a later screen to go back and choose another."
+  blank
+  ui_select one "Continue?" "OK, continue" || true
+}
+
+# The separate disk password (only when "encrypt with a new password" was chosen).
+enckey_form() {
+  ((${ENCRYPT:-0} && ${DISK_NEW_PW:-0})) || return 3
+  [[ -n $ANSWERS ]] && return 3
+  local pw confirm
+  while true; do
+    ask_line "Choose the disk password" "You type it every time the computer starts. Forget it and ALL YOUR DATA IS LOST." "disk password" "" --password || return 2
+    pw=$REPLY_TXT
+    h2 "Repeat the disk password"
+    confirm=$(gum input --password --placeholder "repeat disk password" --prompt "  > ") || continue
+    if [[ -n $pw && $pw == "$confirm" ]]; then DISK_PASSWORD=$pw; luks_password_note "$pw"; return 0; fi
+    warn "The passwords are empty or do not match. Try again."; sleep 1.5
+  done
+}
+
+# File system for the system partition: ext4 (default) or btrfs.
+fs_form() {
+  fs=$(answer fs); fs=${fs:-ext4}
+  [[ -n $ANSWERS ]] && return 3
+  logo
+  hint "Not sure? Keep ext4."
+  blank
+  ui_select one "Which file system for the system partition?" \
+    "ext4: simple, fast and rock solid (recommended)" \
+    "btrfs: snapshots and compression, a little more to manage" || return 2
+  [[ ${UI_PICKED_IDX[0]} == 0 ]] && fs=ext4 || fs=btrfs
+}
+
+# How much of the free space should TapkicH-OS get? (free-space and reinstall modes)
+size_form() {
+  [[ $mode == whole_disk ]] && return 3
+  ROOT_GB=$(answer root_gb)
+  if [[ -n $ROOT_GB ]]; then plan_form || { GOTO=disk_form; return 4; }; return 3; fi
+  [[ -n $ANSWERS ]] && return 3                  # unattended: no question, use all available space
+  local min max
+  min=$(jq -r .root_gb_min <<<"$result"); max=$(jq -r .root_gb_max <<<"$result")
+  ((max > min)) || return 3                       # nothing to choose
+  local gb
+  while true; do
+    logo
+    hint "Minimum ${min} GB. Whatever you do not use stays free (for your other files and systems)."
+    blank
+    ui_select one "How much space should TapkicH-OS get on $disk?" \
+      "All available space (${max} GB)" "Choose an amount in GB" || return 2
+    [[ ${UI_PICKED_IDX[0]} == 0 ]] && return 0
+    blank
+    h2 "How many GB? (${min} to ${max})"
+    while true; do
+      gb=$(gum input --placeholder "${min}-${max}" --prompt "  > ") || continue 2      # ESC: back to the two choices
+      # digits only, at most 6 of them; 10# stops bash reading a leading zero as octal ("08" and "0200" are decimal)
+      if [[ $gb =~ ^[0-9]{1,6}$ ]] && ((10#$gb >= min && 10#$gb <= max)); then gb=$((10#$gb)); break 2; fi
+      warn "Please type a whole number between ${min} and ${max}."
+    done
+  done
+  ROOT_GB=$gb
+  plan_form || { GOTO=disk_form; return 4; }
+}
+
+# ---------- network (after the account steps; the install downloads packages, so it needs internet) ----------
+
+net_wired_cards() {                    # every wired network card (with or without a cable)
+  local d
+  for d in /sys/class/net/*; do
+    [[ -e $d/device && ! -e $d/wireless && ! -e $d/phy80211 ]] || continue
+    [[ $(cat "$d/type" 2>/dev/null) == 1 ]] && basename "$d"
+  done
+}
+
+net_ethernet() {                       # wired cards that have a cable plugged in
+  local n i
+  for n in $(net_wired_cards); do
+    ip link set "$n" up 2>/dev/null || true             # the cable state can only be read while the card is switched on
+    for ((i = 0; i < 8; i++)); do
+      [[ $(cat "/sys/class/net/$n/carrier" 2>/dev/null) == 1 ]] && { echo "$n"; continue 2; }
+      sleep 0.5
+    done
+  done
+}
+
+net_wifi_dev() {                       # name of the first Wi-Fi adapter, if there is one
+  local d
+  for d in /sys/class/net/*; do
+    [[ -e $d/wireless || -e $d/phy80211 ]] && { basename "$d"; return 0; }
+  done
+  return 1
+}
+
+net_online() { [[ $(curl -fsS --max-time 6 -o /dev/null -w '%{http_code}' https://archlinux.org 2>/dev/null) == 200 ]]; }   # a captive portal answers with a redirect: not online
+
+# stdin: `iwctl station <dev> get-networks` output. stdout: one "name<TAB>security" line per network.
+wifi_parse() {
+  sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | sed -nE 's/^ *(> )? *(.*[^ ]) +(psk|open|8021x|wep) +[* ]*$/\2\t\3/p' | awk -F'\t' '!seen[$1]++'
+}
+
+# Try to join a network with iwd (the live system's Wi-Fi daemon). The password is handed over through iwd's own
+# network file (mode 0600), never on a command line. Returns 0 once iwd reports the network as connected.
+wifi_connect() {
+  local dev=$1 ssid=$2 pw=$3 hidden=${4:-0} fname ext i
+  if [[ $ssid =~ ^[A-Za-z0-9_\ -]+$ ]]; then fname=$ssid
+  else fname="=$(printf %s "$ssid" | od -An -tx1 | tr -d ' \n')"; fi          # iwd's file name rule for other characters
+  rm -f "/var/lib/iwd/$fname.psk" "/var/lib/iwd/$fname.open"
+  mkdir -p /var/lib/iwd
+  if [[ -n $pw ]]; then
+    # iwd: an 8-63 character passphrase is `Passphrase=`; the 64-digit hex key is the finished key, `PreSharedKey=`
+    local keyname=Passphrase; [[ $pw =~ ^[0-9a-fA-F]{64}$ ]] && keyname=PreSharedKey
+    ( umask 077; printf '[Security]\n%s=%s\n' "$keyname" "$pw" > "/var/lib/iwd/$fname.psk" )
+  else
+    ( umask 077; : > "/var/lib/iwd/$fname.open" )
+  fi
+  rfkill unblock wifi 2>/dev/null || true
+  if ((hidden)); then iwctl station "$dev" connect-hidden "$ssid" >/dev/null 2>&1
+  else iwctl station "$dev" connect "$ssid" >/dev/null 2>&1; fi
+  # joined = iwd says "connected" (a cable may already give internet, so the internet check alone proves nothing)
+  for ((i = 0; i < 15; i++)); do
+    iwctl station "$dev" show 2>/dev/null | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -Eq 'State +connected' && return 0
+    sleep 1
+  done
+  rm -f "/var/lib/iwd/$fname.psk" "/var/lib/iwd/$fname.open"                     # wrong password: do not keep it
+  return 1
+}
+
+# The Wi-Fi screens. Returns 0 (connected, WIFI_SSID/WIFI_PASSWORD set) or 2 (back).
+wifi_form() {
+  local dev nets raw i
+  local -a names secs items
+  while true; do
+    dev=$(net_wifi_dev) || {
+      logo; h2 "Connect to the internet"; blank
+      warn "No network found: no Ethernet cable and no Wi-Fi adapter."
+      local cards; cards=$(net_wired_cards | tr '\n' ' ')
+      if [[ -n $cards ]]; then body "Network card found: ${cards}(but no cable is detected)"
+      else body "No network card was found at all."; fi
+      body "Plug in an Ethernet cable (or a USB Wi-Fi adapter), then choose Check again."
+      hint "In VirtualBox: Settings > Network > Adapter 1 > Enable, attached to NAT, 'Cable Connected' ticked."
+      blank
+      ui_select one "What now?" "Check again" || return 2
+      [[ -n $(net_ethernet) ]] && return 0
+      continue
+    }
+    logo; h2 "Connect to Wi-Fi"; hint "Looking for networks..."
+    rfkill unblock wifi 2>/dev/null || true
+    if rfkill list wifi 2>/dev/null | grep -qi 'Hard blocked: yes'; then          # a switch or Fn key, software cannot undo it
+      logo; h2 "Connect to Wi-Fi"; blank
+      warn "The Wi-Fi switch is off (hardware switch or Fn key)."
+      body "Switch it on, then choose Check again."
+      blank
+      ui_select one "What now?" "Check again" || return 2
+      continue
+    fi
+    iwctl device "$dev" set-property Powered on >/dev/null 2>&1 || true
+    iwctl station "$dev" scan >/dev/null 2>&1 || true
+    sleep 3
+    if ! nets=$(iwctl station "$dev" get-networks 2>/dev/null); then              # iwd not running / adapter unusable
+      logo; h2 "Connect to Wi-Fi"; blank
+      warn "Wi-Fi is not working on this computer; use an Ethernet cable."
+      blank
+      ui_select one "What now?" "Check again" || return 2
+      continue
+    fi
+    raw=$(wifi_parse <<<"$nets")
+    names=(); secs=(); items=()
+    while IFS=$'\t' read -r n s; do
+      [[ -n $n ]] || continue
+      names+=("$n"); secs+=("$s"); items+=("$n$([[ $s == open ]] || echo '  (password)')")
+    done <<<"$raw"
+    items+=("Search again" "Hidden network (type its name)")
+    logo
+    hint "Pick your Wi-Fi network."
+    blank
+    ui_select one "Which Wi-Fi network?" "${items[@]}" || return 2
+    i=${UI_PICKED_IDX[0]}
+    local ssid="" pw="" hidden=0
+    if ((i == ${#names[@]})); then continue                                    # Search again
+    elif ((i == ${#names[@]} + 1)); then
+      ask_line "Hidden network" "Type the exact network name." "network name" || continue
+      ssid=$REPLY_TXT; hidden=1
+      [[ -n $ssid ]] || continue
+      ask_line "Wi-Fi password" "Leave empty if the network has no password." "password" "" --password || continue
+      pw=$REPLY_TXT
+    else
+      ssid=${names[i]}
+      if [[ ${secs[i]} == 8021x ]]; then
+        logo; warn "Company/school networks (802.1X) are not supported here yet."
+        body "Use another network, or connect with an Ethernet cable."; sleep 3; continue
+      fi
+      if [[ ${secs[i]} != open ]]; then
+        ask_line "Wi-Fi password for $ssid" "" "password" "" --password || continue
+        pw=$REPLY_TXT
+      fi
+    fi
+    if [[ -n $pw ]] && ((${#pw} < 8 || ${#pw} > 63)) && ! [[ $pw =~ ^[0-9a-fA-F]{64}$ ]]; then
+      warn "A Wi-Fi password has 8 to 63 characters."; sleep 2; continue
+    fi
+    logo; h2 "Connecting to $ssid..."
+    if wifi_connect "$dev" "$ssid" "$pw" "$hidden"; then
+      WIFI_SSID=$ssid; WIFI_PASSWORD=$pw; WIFI_HIDDEN=$hidden
+      body "Connected."; sleep 1
+      return 0
+    fi
+    warn "Could not connect. Check the password and try again."; sleep 2
+  done
+}
+
+# Wait (up to 20 s, DHCP can be slow) until the internet answers. Returns 0 when it does.
+wait_online() {
+  local i
+  logo; h2 "Checking the internet connection..."
+  for ((i = 0; i < 20; i++)); do net_online && return 0; sleep 1; done
+  return 1
+}
+
+# The next step only opens when the internet really works: the install downloads everything.
+# Returns 0 = online, 1 = the user wants to change the connection, 2 = back.
+need_internet() {
+  wait_online && return 0
+  logo
+  warn "There is no internet connection."
+  body "The cable or Wi-Fi is connected, but nothing can be reached. The installer needs the internet to download TapkicH-OS."
+  blank
+  ui_select one "What now?" "Check again" "Change the connection" || return 2
+  [[ ${UI_PICKED_IDX[0]} == 0 ]] && { need_internet; return $?; }
+  return 1
+}
+
+network_form() {
+  WIFI_SSID=""; WIFI_PASSWORD=""; WIFI_HIDDEN=0; NET_MODE=""
+  if [[ -n $ANSWERS || ( $DRY == 1 && -n ${TAPKICH_SNAPSHOT:-} ) ]]; then      # unattended / rehearsal: nothing to ask
+    WIFI_SSID=$(answer wifi_ssid); WIFI_PASSWORD=$(answer wifi_password)
+    [[ $(answer wifi_hidden) == true ]] && WIFI_HIDDEN=1
+    return 3
+  fi
+  local eth rc; eth=$(net_ethernet | head -1)
+  while true; do
+    WIFI_SSID=""; WIFI_PASSWORD=""; WIFI_HIDDEN=0
+    if [[ -n $eth ]]; then
+      logo
+      hint "Ethernet is connected ($eth). The installer downloads its packages, so it needs the internet."
+      blank
+      local -a opts=("Use ethernet")                                          # no Wi-Fi adapter: no second choice
+      net_wifi_dev >/dev/null && opts+=("Use ethernet + Wi-Fi (also save a Wi-Fi network)")
+      ui_select one "How should the computer connect?" "${opts[@]}" || return 2
+      if [[ ${UI_PICKED_IDX[0]} == 0 ]]; then NET_MODE=ethernet
+      else wifi_form || continue; NET_MODE=ethernet+wifi; fi                  # ESC in the Wi-Fi screens: back to this menu
+    else                                                                      # no cable: straight to Wi-Fi
+      wifi_form || return 2
+      if [[ -n $WIFI_SSID ]]; then NET_MODE=wifi; else NET_MODE=ethernet; fi    # (a cable may have been plugged in meanwhile)
+    fi
+    need_internet; rc=$?
+    ((rc == 0)) && return 0
+    ((rc == 2)) && continue                                                   # ESC on the "no internet" screen: pick again
+    eth=$(net_ethernet | head -1)                                             # "Change the connection": look again, then start over
+  done
+}
+
+# Progress bar, pacman style: a gradient bar, the step, and the package being handled.
+#   bar_draw <pct> <message> <detail> <first>      (first=1 draws fresh, otherwise redraws the 3 lines in place)
+bar_draw() {
+  local pct=$1 msg=$2 det=$3 first=${4:-0} w=40 filled i r g b t bar=""
+  local -a a=($G_START) e=($G_END)
+  ((pct < 0)) && pct=0; ((pct > 100)) && pct=100
+  filled=$(( pct * w / 100 ))
+  for ((i = 0; i < w; i++)); do
+    if ((i < filled)); then
+      if [[ $TERM == linux ]]; then
+        if ((i * 2 < w)); then bar+=$'\e[34m█'; else bar+=$'\e[35m█'; fi
+      else
+        t=$(( i * 1000 / (w - 1) ))
+        r=$(( a[0] + (e[0] - a[0]) * t / 1000 )); g=$(( a[1] + (e[1] - a[1]) * t / 1000 )); b=$(( a[2] + (e[2] - a[2]) * t / 1000 ))
+        bar+=$(printf '\e[38;2;%d;%d;%dm█' "$r" "$g" "$b")
+      fi
+    else
+      bar+=$'\e['"$S_MUTED"'m░'
+    fi
+  done
+  ((first)) || printf '\e[3A'
+  printf '\r\e[2K%*s%s\e[0m  \e[%sm%3d%%\e[0m\n' "$PAD" '' "$bar" "$S_HEAD" "$pct"
+  printf '\r\e[2K%*s\e[%sm%s\e[0m\n' "$PAD" '' "$S_BODY" "$msg"
+  printf '\r\e[2K%*s\e[%sm%s\e[0m\n' "$PAD" '' "$S_MUTED" "${det:0:60}"
+}
+
+# One short summary instead of the full technical plan.
+review() {
+  # The disks as shown here: `apply` refuses to write if they no longer match (tests that pass their own devices skip this).
+  rm -f "${CONFIRMED_SNAP:-}"                       # coming back to this screen: the earlier list is replaced
+  CONFIRMED_SNAP=""
+  if [[ -z ${TAPKICH_DEVICES:-} && -z ${TAPKICH_SNAPSHOT:-} ]]; then
+    CONFIRMED_SNAP=$(mktemp); chmod 600 "$CONFIRMED_SNAP"
+    trap 'rm -f "${SYSFILE:-}" "${CONFIRMED_SNAP:-}"; printf "\e[?25h"; [[ -n ${SAVED_TTY:-} ]] && stty "$SAVED_TTY" 2>/dev/null' EXIT
+    tapkich-installer detect > "$CONFIRMED_SNAP" 2>/dev/null || { rm -f "$CONFIRMED_SNAP"; CONFIRMED_SNAP=""; }
+  fi
+  logo
+  h2 "Ready to install"
+  blank
+  row() { printf '%*s\e[%sm%-12s\e[0m\e[%sm%s\e[0m\n' "$PAD" '' "$S_MUTED" "$1" "${3:-$S_BODY}" "$2"; }
+  row "Disk" "$disk"
+  local made; made=$(jq -r '.root_fs as $fs | [.created[] | "\(.[1]) GB " + (if .[0]=="TAPKICH_EFI" then "boot (EFI)" else "system (\($fs))" end)] | join(" + ")' <<<"$result")
+  row "Creates" "$made"
+  local gone; gone=$(jq -r '.deleted | join(", ")' <<<"$result")
+  if [[ $mode == whole_disk ]]; then row "Erases" "everything on $disk" "$S_RISK"
+  elif [[ -n $gone ]]; then row "Replaces" "the previous TapkicH-OS ($gone)"
+  else row "Keeps" "everything already on $disk"; fi
+  local kept; kept=$(jq -r '.windows_boot_kept | join(", ")' <<<"$result")
+  if [[ -n $kept ]]; then row "Windows" "boot files on $kept are not touched; Windows is added to the boot menu"
+  elif [[ -n $(jq -r '.boot_map[]?' <<<"$result") ]]; then row "Windows" "found, not affected"; fi
+  if ((${ENCRYPT:-0} && ${DISK_NEW_PW:-0})); then row "Encryption" "ON: a separate disk password. Forget it and the data is lost." "$S_RISK"
+  elif ((${ENCRYPT:-0})); then row "Encryption" "ON: your password is the disk password. Forget it and the data is lost." "$S_RISK"
+  else row "Encryption" "off"; fi
+  case ${NET_MODE:-} in
+    ethernet) row "Network" "Ethernet" ;;
+    wifi) row "Network" "Wi-Fi: $WIFI_SSID (saved on the new system)" ;;
+    ethernet+wifi) row "Network" "Ethernet + Wi-Fi: $WIFI_SSID (saved on the new system)" ;;
+  esac
+  row "You" "$username @ $hostname, $timezone"
+  row "Language" "$locale, keyboard ${xkb_layouts//,/ + }"
+  if [[ ${keybinds:-tapkich} == caelestia ]]; then row "Shortcuts" "Caelestia's own keys"; else row "Shortcuts" "TapkicH-OS keys"; fi
+  if [[ ${secure_boot:-false} == true ]]; then row "Secure Boot" "set up: our keys + Microsoft's (Windows keeps starting)"
+  else row "Secure Boot" "off; later: \`tapkich secureboot setup\` (needs the firmware in Setup Mode)"; fi
+  local w; w=$(jq -r '.warnings[]?' <<<"$result")
+  if [[ -n $w ]]; then blank; warn "Heads up:"; warn "$w"; fi
+  blank
+  if [[ -n $ANSWERS ]]; then return 3; fi
+  local risky=""; [[ $mode == whole_disk ]] && risky=0          # "Install" is drawn red when everything is erased (this menu only)
+  UI_RISKY=$risky ui_select one "Install now?" "Install" "Cancel" || return 2          # ESC: back
+  [[ ${UI_PICKED_IDX[0]} == 0 ]] || abort
+}
+
+install_system() {
+  echo
+  if [[ $DRY == 1 ]]; then
+    body "Dry run: no changes were made."
+    hint "(TAPKICH_DRY=1 is set: rehearsal only.)"
+    return 0
+  fi
+  local args=(apply --disk "$disk" --mode "$mode" --fs "${fs:-ext4}" --i-have-confirmed --progress)
+  ((${ENCRYPT:-0})) && args+=(--encrypt)
+  local o
+  for o in "${overrides[@]}"; do args+=(--override "$o"); done
+  [[ -n $ROOT_GB ]] && args+=(--root-gb "$ROOT_GB")
+  [[ -n ${TAPKICH_DEVICES:-} ]] && args+=(--devices "$TAPKICH_DEVICES")
+  [[ -n ${CONFIRMED_SNAP:-} && -s $CONFIRMED_SNAP ]] && args+=(--confirmed-snapshot "$CONFIRMED_SNAP")
+  # Answers for the system stage. Mode 0600, removed afterwards; the password never appears on a command line.
+  local selftest=false
+  [[ -n $ANSWERS && $(jq -r '.selftest // false' "$ANSWERS") == true ]] && selftest=true
+  SYSFILE=$(mktemp); chmod 600 "$SYSFILE"
+  SAVED_TTY=""
+  [[ -t 0 ]] && SAVED_TTY=$(stty -g 2>/dev/null)
+  trap 'rm -f "${SYSFILE:-}" "${CONFIRMED_SNAP:-}"; printf "\e[?25h"; [[ -n ${SAVED_TTY:-} ]] && stty "$SAVED_TTY" 2>/dev/null' EXIT
+  # The password goes in through the environment, not as a jq argument: arguments are readable by every process
+  # on the machine via /proc/<pid>/cmdline while jq runs.
+  TAPKICH_PW=$password TAPKICH_DISKPW=$DISK_PASSWORD TAPKICH_WIFIPW=${WIFI_PASSWORD:-} jq -n --arg u "$username" --arg h "$hostname" --arg t "$timezone" --arg k "$keyboard" \
+        --arg x "$xkb_layouts" --arg l "$locale" --arg f "${font:-}" --argjson s "$selftest" --arg ws "${WIFI_SSID:-}" \
+        --argjson wh "$([[ ${WIFI_HIDDEN:-0} == 1 ]] && echo true || echo false)" \
+        --arg kb "${keybinds:-tapkich}" --argjson sb "${secure_boot:-false}" \
+        '{username:$u,password:$ENV.TAPKICH_PW,hostname:$h,timezone:$t,keyboard:$k,xkb_layouts:$x,locale:$l,font:$f,selftest:$s,disk_password:$ENV.TAPKICH_DISKPW,wifi_ssid:$ws,wifi_password:$ENV.TAPKICH_WIFIPW,wifi_hidden:$wh,keybinds:$kb,secure_boot:$sb}' > "$SYSFILE"
+  # TAPKICH_PARTITION_ONLY=1 (tests): partition + format + verify, but do not install the system
+  [[ ${TAPKICH_PARTITION_ONLY:-0} == 1 ]] || args+=(--system-answers "$SYSFILE")
+  local out="" line pct msg det tty=0 last_pct=-1
+  [[ -t 1 ]] && tty=1
+  # While installing, typed keys (a held ENTER!) must not echo: the echoed lines scroll the progress bar away.
+  [[ -n $SAVED_TTY ]] && stty -echo 2>/dev/null
+  ((tty)) && { h2 "Installing TapkicH-OS"; blank; printf '\e[?25l'; bar_draw 0 "Starting" "" 1; }
+  # Events (JSON lines) drive the bar; the last non-event line is the result. Errors go to the log.
+  while IFS= read -r line; do
+    if [[ $line == '{"event"'* ]]; then
+      # unit separator, not tab: `read` merges runs of tabs, so an empty detail would shift the fields
+      IFS=$'\x1f' read -r pct msg det el < <(jq -r '[.pct,.msg,.detail,(.elapsed // 0)|tostring]|join("\u001f")' <<<"$line")
+      # a step that takes a while shows its running time, so the screen never looks frozen
+      ((el >= 3)) && msg="$msg  ·  $((el / 60)):$(printf '%02d' $((el % 60)))"
+      if ((tty)); then bar_draw "$pct" "$msg" "$det" 0
+      elif ((pct / 10 != last_pct / 10 || pct == 100)); then echo "[$(printf '%3d' "$pct")%] $msg $det"; last_pct=$pct; fi
+    else
+      out=$line
+    fi
+  done < <(tapkich-installer "${args[@]}" 2>>/var/log/tapkich-os-install.log)
+  ((tty)) && { printf '\e[?25h'; echo; }
+  if [[ -n $SAVED_TTY ]]; then                      # give the terminal back, and throw away whatever was typed meanwhile
+    stty "$SAVED_TTY" 2>/dev/null
+    while IFS= read -rs -t 0.05 -n 1000 _junk; do :; done
+  fi
+  if [[ -z $out ]]; then
+    out=$(jq -n --arg m "The installer stopped unexpectedly. The log is at /var/log/tapkich-os-install.log: $(tail -n 4 /var/log/tapkich-os-install.log 2>/dev/null | tr '\n' ' ')" \
+      '{ok:false,code:"CRASH",message:$m}')
+  fi
+  if [[ $(jq -r .ok <<<"$out") == true ]]; then
+    h2 "TapkicH-OS is installed."
+    [[ $(jq -r '.windows_esps_verified | length' <<<"$out") -gt 0 ]] && body "Windows boot files were verified unchanged."
+    while IFS= read -r note; do [[ -n $note ]] && body "$note"; done < <(jq -r '.notes[]?' <<<"$out")
+    hint "Backup of the old disk layout: $(jq -r .backup_dir <<<"$out")"
+    hint "Remove the install USB/ISO, then reboot. TapkicH-OS starts from its own boot menu."
+    echo "TAPKICH-INSTALL-OK $out" >> /var/log/tapkich-os-install.log
+    # tests and unattended runs read the marker from the console; a person at the keyboard does not need the raw data
+    if [[ -n $ANSWERS || ! -t 1 ]]; then echo "TAPKICH-INSTALL-OK $out"
+    else
+      blank
+      if ui_select one "What now?" "Reboot now" "Stay here (a command line)"; then
+        [[ ${UI_PICKED_IDX[0]} == 0 ]] && { systemctl reboot 2>/dev/null || reboot; }
+      fi
+    fi
+  else
+    echo "TAPKICH-INSTALL-FAILED $out"
+    warn "Stopped: $(jq -r .message <<<"$out" | fold -s -w 70)"
+    if [[ $(jq -r '.rolled_back // empty' <<<"$out") == true ]]; then
+      if [[ $mode == reinstall ]]; then
+        # A reinstall reformats the old TapkicH-OS partitions, so their contents may already be overwritten: only the layout comes back.
+        body "The partition layout was restored."
+        warn "The previous TapkicH-OS on this disk may no longer start (its partitions may already have been overwritten)."
+      elif [[ $mode == whole_disk ]]; then
+        # A whole-disk install writes over the old data before it can fail: the layout comes back, the contents may not.
+        body "The partition layout was restored."
+        warn "Files that were on this disk may already have been overwritten and may be damaged or gone."
+      else
+        body "Everything was put back exactly as it was."
+      fi
+    fi
+    # Secure Boot keys live in the firmware; putting the disk back does not remove them.
+    [[ ${secure_boot:-false} == true ]] && warn "If the Secure Boot step had already run, its keys stay enrolled in the firmware."
+    [[ $(jq -r '.rolled_back // empty' <<<"$out") == false ]] && warn "Could not fully restore the disk layout. Backup: $(jq -r .backup_dir <<<"$out")"
+    exit 1
+  fi
+}
+
+
+# ---------- main ----------
+
+if [[ -z $ANSWERS && ! -r /dev/tty ]]; then
+  echo "The installer needs a terminal (a keyboard and screen). Run it from the console, not from a script."
+  exit 1
+fi
+command -v gum >/dev/null || { echo "gum missing"; exit 1; }
+command -v jq >/dev/null || { echo "jq missing"; exit 1; }
+
+# TapkicH-OS installs in UEFI mode only. (Rehearsals and unattended runs do not care.)
+if [[ -z $ANSWERS && $DRY != 1 && -z ${TAPKICH_SNAPSHOT:-} && ! -d /sys/firmware/efi ]]; then
+  logo
+  warn "This computer started in the old BIOS mode."
+  blank
+  body "TapkicH-OS needs UEFI. Nothing was changed."
+  body "VirtualBox: shut down, then Settings > System > tick 'Enable EFI (special OSes only)'."
+  body "Real PC: turn off 'Legacy' / 'CSM' boot in the firmware setup."
+  exit 1
+fi
+
+# Same order as Omarchy's installer: keyboard, user, then network, disk, install mode, ... then confirm.
+# (language sits with the keyboard; space, encryption and file system come after the install mode)
+# Every step is one screen. ESC (or LEFT / BACKSPACE) goes back one step; at the very first step it offers to cancel.
+STEPS=(keyboard_form language_form shortcuts_form secureboot_form username_form password_form hostname_form network_form timezone_form
+       disk_form mode_form plan_step size_form encrypt_form enckey_form fs_form plan_step review)
+SILENT_BACK=" plan_step "      # no screen of their own: skipped when going back
+GOTO=""; DISK_PASSWORD=""; DISK_NEW_PW=0; WIFI_SSID=""; WIFI_PASSWORD=""; WIFI_HIDDEN=0; NET_MODE=""
+step=0; dir=1
+while ((step < ${#STEPS[@]})); do
+  name=${STEPS[step]}
+  if ((dir < 0)) && [[ $SILENT_BACK == *" $name "* ]]; then ((step--)); continue; fi
+  "$name"; rc=$?
+  ((${UI_EOF:-0})) && abort "No keyboard input available. Nothing was changed."
+  case $rc in
+    0) dir=1; ((step++)) ;;
+    2) dir=-1; ((step--)) ;;
+    3) ((step += dir)) ;;
+    4) for ((k = 0; k < ${#STEPS[@]}; k++)); do [[ ${STEPS[k]} == "$GOTO" ]] && step=$k; done; dir=1 ;;
+    *) abort "Unexpected error in step $name (code $rc)." ;;
+  esac
+  if ((step < 0)); then                          # back from the very first screen
+    logo
+    ui_select one "Cancel the installation?" "No, keep going" "Yes, cancel (nothing was changed)" || { ((${UI_EOF:-0})) && abort; step=0; dir=1; continue; }
+    [[ ${UI_PICKED_IDX[0]} == 1 ]] && abort
+    step=0; dir=1
+  fi
+done
+install_system

@@ -1,0 +1,19 @@
+#!/bin/bash
+# TapkicH-OS live ISO: start the installer inside the Hyprland kiosk (from ~/.zlogin on the first console).
+# Exit 0 = the installer ran in the kiosk and came back (it wrote the done marker); exit 1 = Hyprland could not start or
+# died before the installer finished, so the caller shows the installer on the plain console instead (machines without
+# working graphics must still be installable, and tty1 must never end at a bare shell).
+LOG=/run/tapkich-kiosk.log
+DONE=/run/tapkich-kiosk.done
+rm -f "$DONE"
+# Real GPU drivers load a moment after boot: let udev finish, then give the graphics device up to 5 more seconds.
+udevadm settle --timeout=10 2>/dev/null
+for ((i = 0; i < 25; i++)); do compgen -G '/dev/dri/card*' >/dev/null && break; sleep 0.2; done
+compgen -G '/dev/dri/card*' >/dev/null || { echo "no graphics device" >"$LOG"; exit 1; }
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+export XDG_SESSION_TYPE=wayland
+# The live system runs everything as root (the installer partitions disks). Hyprland refuses root unless told with
+# its own (oddly named) flag; acceptable here: a single-purpose installer window, no user data, nothing else runs.
+start-hyprland -- --i-am-really-stupid --config /usr/share/tapkich-os/kiosk/hyprland.lua >"$LOG" 2>&1
+[[ -e $DONE ]]

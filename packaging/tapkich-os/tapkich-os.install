@@ -1,0 +1,9 @@
+post_install() {
+  # our package-signing key, so pacman trusts the [tapkich] update repository
+  pacman-key --populate tapkich >/dev/null 2>&1 || echo "tapkich-os: could not add the TapkicH-OS signing key (run: pacman-key --populate tapkich)"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+post_upgrade() {
+  post_install
+}

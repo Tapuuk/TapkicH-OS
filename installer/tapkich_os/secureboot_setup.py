@@ -1,0 +1,268 @@
+"""`tapkich secureboot setup`: Secure Boot with our own keys, Windows-compatible.
+
+How it works (decided 2026-10-19):
+  - sbctl creates our own Secure Boot keys and enrolls them together WITH Microsoft's (`sbctl enroll-keys -m`), so
+    Windows' boot manager and graphics-card firmware (signed by Microsoft) keep starting with Secure Boot on.
+  - The firmware checks Limine's EFI file: we sign it (both copies on our ESP) with our key.
+  - Limine checks everything it loads: the BLAKE2b hash of limine.conf is enrolled into the signed Limine binary
+    (`limine enroll-config`), and every file in limine.conf carries its own hash (`path#hash`). So a changed kernel,
+    initramfs or config is refused. The kernel is also signed with our key (useful if it is ever started directly).
+  - Windows is chainloaded through the firmware (protocol efi), which checks Microsoft's signature itself.
+  - Updates stay signed: a pacman hook runs `tapkich secureboot refresh` after every transaction (after sbctl's own
+    hook). It does nothing until Secure Boot was set up, and only rewrites what changed.
+Keys can only be enrolled while the firmware is in Setup Mode; firmware never allows that silently from the OS.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+STATE_FILE = "/etc/tapkich-os/secureboot.conf"
+BOOT = "/boot"
+LIMINE_SRC = "/usr/share/limine/BOOTX64.EFI"
+LIMINE_EFIS = ["EFI/limine/limine_x64.efi", "EFI/BOOT/BOOTX64.EFI"]          # relative to /boot (our ESP)
+LIMINE_CONFS = ["EFI/limine/limine.conf", "EFI/BOOT/limine.conf"]
+KERNELS = ["vmlinuz-linux-zen"]
+HOOK_NAME = "zzzz-tapkich-secureboot.hook"                 # sorts after sbctl's zz-sbctl.hook and mkinitcpio's 90-*
+PACMAN_HOOK = """[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = Keeping the TapkicH-OS boot files signed for Secure Boot (does nothing if it is not set up)...
+When = PostTransaction
+Exec = /usr/bin/tapkich secureboot refresh --hook
+"""
+
+# Limine config keys whose value is a file Limine loads and must be hash-checked under Secure Boot.
+HASHED_KEYS = ("path", "module_path", "kernel_path", "dtb_path", "wallpaper", "term_font")
+_FILE_LINE = re.compile(r"^(\s*)(" + "|".join(HASHED_KEYS) + r")(\s*:\s*)(boot\(\):)(/[^#\s]+)(#[0-9a-fA-F]*)?\s*$")
+
+
+def blake2b_file(path: str) -> str:
+    h = hashlib.blake2b()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def blake2b_text(text: str) -> str:
+    return hashlib.blake2b(text.encode()).hexdigest()
+
+
+def with_hashes(conf: str, hash_of) -> str:
+    """limine.conf with a fresh `#<blake2b>` on every file on our ESP (`boot():/...`). `hash_of(relpath)` returns the
+    hex hash, or None when the file is missing (the line is then left without a hash and Limine will refuse it; the
+    caller reports it). EFI chainload entries (`guid(...)` paths, Windows) are left alone: the firmware checks those."""
+    out = []
+    for line in conf.splitlines():
+        m = _FILE_LINE.match(line)
+        if m:
+            indent, key, sep, dev, rel, _old = m.groups()
+            h = hash_of(rel.lstrip("/"))
+            line = f"{indent}{key}{sep}{dev}{rel}" + (f"#{h}" if h else "")
+        out.append(line)
+    return "\n".join(out) + ("\n" if conf.endswith("\n") else "")
+
+
+def without_hashes(conf: str) -> str:
+    return with_hashes(conf, lambda rel: None)
+
+
+def missing_hashes(conf: str) -> list:
+    """Files in the config that have no hash (Limine would refuse to boot them under Secure Boot)."""
+    out = []
+    for line in conf.splitlines():
+        m = _FILE_LINE.match(line)
+        if m and not (m.group(6) or "").lstrip("#") and m.group(2) not in ("wallpaper", "term_font"):
+            out.append(m.group(5))
+    return out
+
+
+def read_state_file(path: str = STATE_FILE) -> dict:
+    try:
+        with open(path) as f:
+            return dict(l.strip().split("=", 1) for l in f if "=" in l and not l.startswith("#"))
+    except OSError:
+        return {}
+
+
+def render_state_file(st: dict) -> str:
+    return ("# TapkicH-OS Secure Boot (written by `tapkich secureboot setup`; `tapkich secureboot refresh` keeps it)\n"
+            + "".join(f"{k}={v}\n" for k, v in sorted(st.items())))
+
+
+# ---------------------------------------------------------------- doing it (root only)
+
+def _run(cmd: list, check: bool = True, **kw) -> subprocess.CompletedProcess:
+    p = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if check and p.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)} failed (exit {p.returncode}): {(p.stderr or p.stdout).strip()[-400:]}")
+    return p
+
+
+def sbctl_has_keys() -> bool:
+    return any(os.path.isdir(d) and os.listdir(d) for d in ("/var/lib/sbctl/keys", "/usr/share/secureboot/keys"))
+
+
+def refresh(boot: str = BOOT, state_path: str = STATE_FILE, force: bool = False, log=print) -> bool:
+    """Sign the kernel, hash every boot file into limine.conf, enroll the config hash into Limine and sign Limine.
+    Only does work when something changed (or force). Returns True when everything is signed."""
+    st = read_state_file(state_path)
+    kernels = [k for k in KERNELS if os.path.isfile(os.path.join(boot, k))]
+    for k in kernels:                                  # signing changes the file: hash it afterwards
+        if st.get(f"signed_{k}") != blake2b_file(os.path.join(boot, k)) or force:
+            _run(["sbctl", "sign", "-s", os.path.join(boot, k)])
+            st[f"signed_{k}"] = blake2b_file(os.path.join(boot, k))
+            log(f"  signed {k}")
+    confs = [c for c in LIMINE_CONFS if os.path.isfile(os.path.join(boot, c))]
+    if not confs:
+        raise RuntimeError(f"no limine.conf found on {boot}")
+    with open(os.path.join(boot, confs[0])) as f:
+        conf = f.read()
+    new = with_hashes(conf, lambda rel: blake2b_file(os.path.join(boot, rel)) if os.path.isfile(os.path.join(boot, rel)) else None)
+    missing = missing_hashes(new)
+    if missing:
+        raise RuntimeError("these boot files are missing, Limine would refuse to start: " + ", ".join(missing))
+    conf_hash = blake2b_text(new)
+    src_hash = blake2b_file(LIMINE_SRC) if os.path.isfile(LIMINE_SRC) else ""
+    # A Limine reinstall copies the unsigned binary over both ESP files without changing any hash above, so the files
+    # are also compared with what was recorded right after signing them (no record yet: sign once).
+    efis_ok = all(os.path.isfile(os.path.join(boot, e)) and st.get(f"signed_{e}") == blake2b_file(os.path.join(boot, e))
+                  for e in LIMINE_EFIS)
+    changed = force or not efis_ok or conf_hash != st.get("config_hash") or src_hash != st.get("limine_source_hash")
+    if changed:
+        for c in LIMINE_CONFS:
+            path = os.path.join(boot, c)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(new)
+        for e in LIMINE_EFIS:
+            path = os.path.join(boot, e)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            shutil.copyfile(LIMINE_SRC, path)           # a clean binary each time (enroll-config writes into it)
+            _run(["limine", "enroll-config", "--quiet", path, conf_hash])
+            _run(["sbctl", "sign", "-s", path])
+            st[f"signed_{e}"] = blake2b_file(path)      # signing changes the file: hash it afterwards
+        st.update(config_hash=conf_hash, limine_source_hash=src_hash)
+        log("  boot menu config hashed and enrolled; Limine signed")
+    st["enrolled"] = st.get("enrolled", "no")
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    with open(state_path, "w") as f:
+        f.write(render_state_file(st))
+    return True
+
+
+def _ask(question: str, default: bool = False) -> bool:
+    hint = "[Y/n]" if default else "[y/N]"
+    try:
+        answer = input(f"  {question} {hint} ").strip().lower()
+    except EOFError:
+        return default
+    return default if not answer else answer in ("y", "yes")
+
+
+NOT_SETUP_MODE = """  Your firmware is not in Setup Mode, so new Secure Boot keys cannot be added from here (by design: firmware never
+  lets the running system change its keys silently).
+
+  To get there (the names differ per maker):
+    1. Restart into the firmware settings (UEFI / BIOS setup). This command can do that for you.
+    2. Find "Secure Boot". Choose "Reset to Setup Mode", "Clear Secure Boot keys" or "Delete all keys"
+       (on some boards: set "Secure Boot Mode" to "Custom" first). Do NOT choose "Restore factory keys".
+    3. Save and boot TapkicH-OS again, then run `tapkich secureboot setup` once more.
+  Clearing the keys also removes Microsoft's from the firmware for a moment; this command puts them back together
+  with ours, so Windows keeps starting with Secure Boot on.
+"""
+
+BITLOCKER_WARNING = """  If Windows on this computer uses BitLocker (device encryption), changing Secure Boot keys makes Windows ask for
+  the BitLocker RECOVERY KEY at its next start. Have it ready first (https://account.microsoft.com/devices/recoverykey)
+  or suspend BitLocker in Windows before you change anything in the firmware.
+"""
+
+
+def setup(assume_yes: bool = False, from_installer: bool = False, log=print) -> int:
+    from .secureboot import read_state
+    if os.geteuid() != 0:
+        log("tapkich secureboot setup must run as root (sudo tapkich secureboot setup).")
+        return 1
+    st = read_state("/")
+    if not st["uefi"]:
+        log("  This computer started in legacy BIOS mode: Secure Boot needs UEFI.")
+        return 1
+    if not shutil.which("sbctl"):
+        log("  Installing sbctl (the Secure Boot key tool) ...")
+        if subprocess.run(["pacman", "-S", "--needed", "--noconfirm", "sbctl"]).returncode != 0:
+            log("  Could not install sbctl.")
+            return 1
+    ours = st["tapkich_key_in_db"] or read_state_file().get("enrolled") == "yes"
+    if not st["setup_mode"] and not ours:
+        log("Secure Boot setup\n")
+        log(NOT_SETUP_MODE)
+        log(BITLOCKER_WARNING)
+        if not assume_yes and not from_installer and _ask("Restart into the firmware settings now?"):
+            subprocess.run(["systemctl", "reboot", "--firmware-setup"])
+        return 1
+    log("Secure Boot setup\n")
+    if st["setup_mode"]:
+        log(BITLOCKER_WARNING)
+        if not assume_yes and not _ask("Create our keys and enroll them together with Microsoft's now?", default=True):
+            log("  Nothing was changed.")
+            return 1
+    try:
+        if not sbctl_has_keys():
+            log("  creating our Secure Boot keys (kept in /var/lib/sbctl, readable by root only) ...")
+            _run(["sbctl", "create-keys"])
+        log("  signing the boot files (before touching the firmware) ...")
+        refresh(force=True, log=log)
+        if st["setup_mode"]:
+            log("  enrolling our keys together with Microsoft's ...")
+            p = _run(["sbctl", "enroll-keys", "--microsoft"], check=False)
+            if p.returncode != 0 and "brick" in (p.stdout + p.stderr).lower():
+                # sbctl asks for this when it cannot read the TPM event log to check option ROMs. With Microsoft's
+                # keys enrolled, option ROMs (graphics cards) signed by Microsoft keep working, which is what it checks.
+                p = _run(["sbctl", "enroll-keys", "--microsoft", "--yes-this-might-brick-my-machine"], check=False)
+            if p.returncode != 0:
+                raise RuntimeError("sbctl enroll-keys failed: " + (p.stderr or p.stdout).strip()[-400:])
+        s = read_state_file()
+        s["enrolled"] = "yes"
+        with open(STATE_FILE, "w") as f:
+            f.write(render_state_file(s))
+    except RuntimeError as e:
+        log(f"\n  Secure Boot setup stopped: {e}\n  The firmware keys were not changed unless the last step said so.")
+        return 1
+    log("""
+  Done. Our keys and Microsoft's are enrolled, and the boot files are signed.
+  Restart. Most firmware switches Secure Boot on by itself once keys are enrolled; if `tapkich secureboot status`
+  still says it is off, turn "Secure Boot" on in the firmware settings. Windows keeps starting (Microsoft's keys
+  stay trusted). Kernel and driver updates are signed automatically from now on.""")
+    return 0
+
+
+def main(args: list) -> int:
+    if args[:1] == ["refresh"]:
+        hook = "--hook" in args
+        if not os.path.isfile(STATE_FILE):
+            return 0                                          # not set up: nothing to keep signed
+        if os.geteuid() != 0:
+            print("tapkich secureboot refresh must run as root")
+            return 1
+        try:
+            refresh(force="--force" in args, log=(lambda *_: None) if hook else print)
+        except RuntimeError as e:
+            print(f"TapkicH-OS Secure Boot: could not re-sign the boot files: {e}\n"
+                  "Do not restart with Secure Boot on before this is fixed (run `sudo tapkich secureboot refresh`).")
+            return 1
+        return 0
+    return setup(assume_yes="--yes" in args, from_installer="--from-installer" in args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

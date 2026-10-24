@@ -1,0 +1,24 @@
+# TapkicH-OS's own files as one package: the `tapkich` command, Gaming Mode's session files, our pacman hooks, tuning,
+# the update channel and our package-signing key (the list is installer/tapkich_os/package.py).
+# Built from this repository's working tree by packaging/build-tapkich-os.sh (TAPKICH_SRC, TAPKICH_PKGVER), for the
+# ISO's local repo and for the [tapkich] update repository.
+pkgname=tapkich-os
+pkgver=${TAPKICH_PKGVER:?set by packaging/build-tapkich-os.sh}
+pkgrel=1
+pkgdesc="TapkicH-OS: the tapkich command, Gaming Mode session files, pacman hooks, tuning and the update channel"
+arch=('any')
+url="https://github.com/Tapuuk/TapkicH-OS"
+license=('GPL-3.0-or-later')
+depends=('python' 'sudo' 'pacman')
+optdepends=('sbctl: tapkich secureboot setup'
+            'gamescope-session-steam-git: Gaming Mode'
+            'pciutils: tapkich doctor (graphics cards)'
+            'vulkan-tools: tapkich doctor (Vulkan)')
+install=tapkich-os.install
+mapfile -t backup < <(PYTHONPATH="$TAPKICH_SRC/installer" python3 -m tapkich_os.package --backup x | tr ' ' '\n')
+
+package() {
+  PYTHONPATH="$TAPKICH_SRC/installer" python3 -m tapkich_os.package "$pkgdir" >/dev/null
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/tapkich-os/version" <<<"$pkgver"
+  install -Dm644 "$TAPKICH_SRC/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

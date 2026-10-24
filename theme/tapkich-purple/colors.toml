@@ -1,0 +1,41 @@
+# TapkicH-OS default theme: exactly TWO brand colors, until the colour-change feature exists.
+#   primary   = violet   (the 2nd shade of the original gradient)
+#   secondary = orchid   (the 3rd shade of the original gradient)
+# Everything coloured in the OS (installer, boot menu, wallpaper gradient, later: borders, shell accents) is
+# one of these two or a blend between them. The rest are neutrals (near-black backgrounds, greys, near-white text).
+mode = "dark"
+
+primary = "#7c3aed"
+secondary = "#c084fc"
+
+# Gradient = primary -> secondary (borders, wallpaper, logo, panel accents). Angle for Hyprland gradient borders.
+gradient_start = "#7c3aed"
+gradient_end = "#c084fc"
+gradient_angle = 45
+
+# Corner roundness in pixels for windows, bar, launcher, notifications and login screen (0 = square).
+corner_radius = 20
+
+# Neutrals (no hue of their own beyond a faint purple tint in the darkest ones)
+background = "#0c0a12"
+dark_background = "#09070e"
+darker_background = "#06050a"
+lighter_background = "#17141f"
+selection = "#241d33"
+muted = "#3a3548"
+
+foreground = "#d4d2da"
+dark_foreground = "#6e6b78"
+light_foreground = "#b4b1bd"
+bright_foreground = "#eeedf2"
+
+# Compatibility aliases for tools that expect an accent
+accent = "#7c3aed"
+
+# Semantic exception to the two-colour rule: warnings, errors and risky/destructive actions are red.
+danger = "#e5484d"
+danger_bright = "#ff6b6b"
+
+# Text roles (shades of grey, so brand colours stay meaningful):
+#   header = bright_foreground (bold)   subheader = primary   body = light_foreground
+#   hint/muted = dark_foreground        action (cursor) = secondary (bold)   selected = primary   risky = danger_bright

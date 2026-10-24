@@ -1,0 +1,14 @@
+#!/bin/bash
+# TapkicH-OS live ISO: inside the kiosk, open the installer's glass terminal; when it closes, end the kiosk.
+# The font follows the screen so the installer always has about 100 x 30 characters (720p: 15 px, 1080p: 22 px).
+read -r w h < <(hyprctl monitors -j | jq -r '.[0] | "\(.width) \(.height)"')
+w=${w:-1280}; h=${h:-720}
+px=$(( h / 46 ))
+max=$(( w * 72 / 100 / 58 ))            # ~100 columns fit in the window (a glyph is ~0.58 of the size)
+((px > max)) && px=$max
+((px < 13)) && px=13
+# After the installer: a command line in the same window (its "Stay here" choice); closing that ends the kiosk.
+foot --config /usr/share/tapkich-os/kiosk/foot.ini --app-id tapkich-installer --title "TapkicH-OS installer" \
+     --font "JetBrains Mono:pixelsize=$px" \
+     zsh -c 'tapkich-setup; touch /run/tapkich-kiosk.done; echo; exec zsh -i'
+hyprctl dispatch 'hl.dsp.exit()' >/dev/null 2>&1
