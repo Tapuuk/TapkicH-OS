@@ -990,6 +990,7 @@ class SystemInstaller:
             rc = p.wait()
             finished.set()
             self._signal_group(p, signal.SIGKILL)      # anything the command left running in its group
+            self._wait_group_gone(p)
         except BaseException:                          # interrupted: stop the build before the rollback unmounts
             finished.set()
             if timer:
@@ -1007,6 +1008,7 @@ class SystemInstaller:
                         break
                     except BaseException:
                         continue
+                self._wait_group_gone(p)
                 self._remove_stale_pacman_lock()
             raise
         finally:
@@ -1026,6 +1028,21 @@ class SystemInstaller:
             os.killpg(p.pid, sig)
         except OSError:                                # the group is already gone
             pass
+
+    @staticmethod
+    def _wait_group_gone(p, limit: float = 5.0):
+        """kill() returns before a killed process has really ended: wait (briefly) until nothing of the group is left,
+        so the files it held open in the new system are closed before anything unmounts."""
+        end = time.monotonic() + limit
+        while time.monotonic() < end:
+            try:
+                os.killpg(p.pid, 0)
+            except OSError:                            # no process of the group left
+                return
+            try:
+                time.sleep(0.05)
+            except BaseException:                      # a further Ctrl-C while waiting: the wait is short, finish it
+                pass
 
     def _remove_stale_pacman_lock(self):
         """A pacman stopped in the middle leaves db.lck in the new system. With no pacman running there, remove it."""
