@@ -18,6 +18,7 @@ import math
 import os
 import time
 import re
+import shutil
 import tomllib
 from dataclasses import dataclass
 from typing import Optional
@@ -170,9 +171,21 @@ class SystemAnswers:
         return SystemAnswers(**{k: raw[k] for k in keys if k in raw})
 
 
+def _keyfile_value(v: str) -> str:
+    """A value the way GKeyFile (NetworkManager's keyfile reader) wants it: backslash, tab, CR and LF escaped, and a
+    leading or trailing space written as \\s (a bare one would be trimmed)."""
+    v = v.replace("\\", "\\\\").replace("\t", "\\t").replace("\r", "\\r").replace("\n", "\\n")
+    if v.startswith(" "):
+        v = "\\s" + v[1:]
+    if v.endswith(" "):
+        v = v[:-1] + "\\s"
+    return v
+
+
 def render_wifi_profile(ssid: str, password: str, uuid: str, hidden: bool = False) -> str:
     """NetworkManager keyfile for the Wi-Fi network chosen during the install, so the new system connects by itself.
     A 64-digit hex key goes in `psk=` as it is (NetworkManager accepts the raw key). Installed with mode 0600."""
+    ssid, password = _keyfile_value(ssid), _keyfile_value(password)
     lines = ["[connection]", f"id={ssid}", f"uuid={uuid}", "type=wifi", "autoconnect=true", "",
              "[wifi]", "mode=infrastructure", f"ssid={ssid}", *(["hidden=true"] if hidden else []), ""]
     if password:
@@ -217,7 +230,8 @@ def render_xkb_conf(layouts: str) -> str:
 # Mirrored in the wizard (iso/overlay/usr/local/bin/tapkich-setup, username_screen): keep both lists the same.
 RESERVED_USERS = frozenset("""root bin daemon mail ftp http nobody dbus uuidd dnsmasq rpc ntp avahi colord polkitd rtkit
 sddm git geoclue usbmux flatpak nm-openconnect nm-openvpn alpm tss games saned brltty cups wheel adm sys users
-gamemode""".split())
+gamemode audio video input render kvm disk storage optical log lock lp network power scanner tty utmp uucp rfkill
+kmem proc floppy sgx nvidia-persistenced""".split())
 
 
 def validate_answers(a: "SystemAnswers", zoneinfo: str = ZONEINFO) -> None:
@@ -475,9 +489,12 @@ class SystemInstaller:
         self.progress.emit(STAGES["configure"], "Configuring the system", "language, keyboard, user, network")
         self._configure()
         self._refresh_aur()                                # only the AUR packages that are outdated
+        self._clean_build_cache()
         self._caelestia()                                  # the desktop: always, not only with the extra apps
+        self._clean_build_cache()
         if self.a.extra_apps:
             self._aur_apps()
+            self._clean_build_cache()
         root_uuid = self.run(["blkid", "-s", "UUID", "-o", "value", root]).stdout.strip()
         if self.luks_node:
             self.progress.emit(STAGES["encrypt"], "Preparing the encrypted boot", "adding the disk-unlock step to the initramfs")
@@ -486,12 +503,16 @@ class SystemInstaller:
         self._limine(root_uuid)
         self.progress.emit(STAGES["entry"], "Registering the boot entry")
         self._uefi_entry(esp, result)
+        self._boot_menu_notes(esp)
+        # Order of the end: nothing after the Secure Boot step touches the new system except the unmount. Enrolling
+        # keys is the one change a rollback cannot undo, so everything that can still fail comes before it.
+        self._clean_pacman_cache()
+        self._keep_install_log(result.backup_dir)
         if self.a.secure_boot:
             self.progress.emit(STAGES["secureboot"], "Setting up Secure Boot", "our keys + Microsoft's, signing Limine and the kernel")
             self._secure_boot()
-        self._boot_menu_notes(esp)
+            self._keep_install_log()                       # again, so the log on the new system has this step too
         self.progress.emit(STAGES["unmount"], "Unmounting")
-        self._keep_install_log(result.backup_dir)
         self._unmount()
         self._cleanup_old_entries()
 
@@ -643,14 +664,29 @@ class SystemInstaller:
             f.write(f"LANG={a.locale}.UTF-8\n")
         # Windows reads the hardware clock as local time, so with Windows on the computer we keep local time there too
         local_clock = self._windows_stays()
+        write_clock = True
         if local_clock:
             self.notes.append("Windows is on this computer, so the hardware clock keeps local time (as Windows "
                               "expects); both systems show the same time.")
+            # The live system's clock is only right if it was synchronised. If not, writing it to the hardware clock
+            # would set Windows' time wrong: leave the clock alone, and only tell the new system it is local time.
+            ntp = self.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], check=False)
+            if (ntp.stdout or "").strip() != "yes":
+                write_clock = False
+                with open(f"{self.mnt}/etc/adjtime", "w") as f:
+                    f.write("0.0 0 0\n0\nLOCAL\n")
+                self.notes.append("This computer's clock could not be checked during the install (no internet time), "
+                                  "so the hardware clock was left alone. Check the date and time in Windows.")
+        for db in ("passwd", "group"):                  # a name the new system already uses would fail useradd late
+            taken = self.run(["arch-chroot", self.mnt, "getent", db, a.username], check=False)
+            if (taken.stdout or "").strip():
+                raise ApplyError("BAD_ANSWER", f"the user name {a.username!r} is already used by the new system "
+                                 "(as an account or group name). Start again with another name.")
         self._chroot(
             "sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && "
             f"sed -i 's/^#{a.locale}.UTF-8 UTF-8/{a.locale}.UTF-8 UTF-8/' /etc/locale.gen && locale-gen && "
             f"ln -sf /usr/share/zoneinfo/{a.timezone} /etc/localtime && "
-            f"hwclock --systohc{' --localtime' if local_clock else ''} && "
+            + (f"hwclock --systohc{' --localtime' if local_clock else ''} && " if write_clock else "") +
             f"useradd -m -G wheel -s {shell.LOGIN_SHELL} {a.username} && "
             # gamemode's limits.d file lets the group raise game priority
             f"{{ getent group gamemode >/dev/null && usermod -aG gamemode {a.username} || true; }} && "
@@ -708,6 +744,15 @@ class SystemInstaller:
                 step = Span(self.progress, lo + (hi - lo) * i / n, lo + (hi - lo) * (i + 1) / n)
                 msg = f"Installing extra apps ({i + 1} of {n}): {name}"
                 step.at(0, msg, "starting")
+                need = apps.AUR_SPACE_NEEDED.get(pkg, 0)
+                if need and self._free_bytes() < need:
+                    failed.append(pkg)
+                    self.progress.log(f"WARNING: not enough free space on the new system for {pkg} "
+                                      f"(needs {need // 2 ** 30} GiB); skipped")
+                    self.notes.append(f"{name} was not installed: the disk is too full for it. Free some space, then "
+                                      f"run `{apps.retry_hint(pkg)}`.")
+                    step.at(1, msg, "skipped, not enough space")
+                    continue
                 self.progress.log(f"aur: installing {pkg}")
                 def show(line, step=step, msg=msg):
                     frac = aur_fraction(line)
@@ -721,6 +766,8 @@ class SystemInstaller:
                     failed.append(pkg)
                     self.progress.log(f"WARNING: {label} could not be installed ({pkg}); continuing. "
                                       f"Last output: {' | '.join(tail[-5:])!r}")
+                    self.notes.append(f"{name} could not be installed during the install. When the computer is online, "
+                                      f"run `{apps.retry_hint(pkg)}`.")
                     for fb in fallback:
                         step.at(0.9, msg, f"falling back to {fb}")
                         self.run(["arch-chroot", self.mnt, "pacman", "-S", "--noconfirm", "--needed", fb], check=False)
@@ -819,24 +866,63 @@ class SystemInstaller:
         if rc != 0:
             self.progress.log(f"WARNING: Caelestia's installer failed (exit {rc}). "
                               f"Last output: {' | '.join(list(tail)[-5:])!r}")
+            self.notes.append("The desktop (Caelestia shell) did not finish setting up. Log in, connect to the "
+                              f"internet and run `{caelestia.INSTALL_COMMAND}` as your user.")
+
+    def _free_bytes(self) -> int:
+        return shutil.disk_usage(self.mnt).free
+
+    def _clean_build_cache(self):
+        """paru leaves every AUR build tree in ~/.cache/paru/clone (Proton-GE alone: about 3 GB). Not needed afterwards."""
+        clone = f"{self.mnt}/home/{self.a.username}/.cache/paru/clone"
+        try:
+            names = os.listdir(clone)
+        except OSError:
+            return
+        for name in names:
+            shutil.rmtree(f"{clone}/{name}", ignore_errors=True)
+
+    def _clean_pacman_cache(self):
+        """The downloaded packages (what `pacman -Scc` removes): the new system fetches what it needs later, and a disk
+        near the minimum size cannot spare the room. Removed directly, since --noconfirm would answer `no` to -Scc."""
+        cache = f"{self.mnt}/var/cache/pacman/pkg"
+        try:
+            names = os.listdir(cache)
+        except OSError:
+            return
+        for name in names:
+            path = f"{cache}/{name}"
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    KILL_GRACE = 10                    # seconds a stopped command gets to end after SIGTERM, before SIGKILL
 
     def _stream(self, cmd: list, on_line, log_prefix: str = "", timeout: float | None = None) -> tuple:
         """Run a command, calling on_line(line) for every output line (ANSI colours removed). A carriage return ends a
         line too, so download progress (curl, pacman) shows live instead of the screen looking frozen. With a timeout
         the command and everything it started are stopped after that many seconds (exit code 124).
+        The command runs in a session of its own (start_new_session), so its process group holds everything it starts,
+        also what arch-chroot starts inside its PID namespace (seen from here those processes are in the group too).
+        Stopping sends the group SIGTERM, then SIGKILL after KILL_GRACE seconds (SIGKILL from here also ends the
+        namespace's init, and with it the whole namespace). The same happens when the time is up and when an
+        exception (Ctrl-C, SIGTERM, SIGHUP) arrives, so a rollback never unmounts under a running build.
         Returns (exit code, last lines)."""
         import signal
         import threading
         tail: deque = deque(maxlen=25)
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-        timed_out = threading.Event()
+        timed_out, finished = threading.Event(), threading.Event()
 
-        def stop():
+        def stop():                                    # the time limit: runs in the timer thread
             timed_out.set()
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            self._signal_group(p, signal.SIGTERM)
+            if not finished.wait(self.KILL_GRACE):
+                self._signal_group(p, signal.SIGKILL)
         timer = threading.Timer(timeout, stop) if timeout else None
         if timer:
             timer.daemon = True
@@ -854,14 +940,61 @@ class SystemInstaller:
             if buf:
                 self._stream_line(buf, tail, on_line, log_prefix)
             rc = p.wait()
+            finished.set()
+            self._signal_group(p, signal.SIGKILL)      # anything the command left running in its group
+        except BaseException:                          # interrupted: stop the build before the rollback unmounts
+            finished.set()
+            if timer:
+                timer.cancel()
+            self._signal_group(p, signal.SIGTERM)
+            try:
+                p.wait(timeout=self.KILL_GRACE)
+            except subprocess.TimeoutExpired:
+                pass
+            self._signal_group(p, signal.SIGKILL)
+            p.wait()
+            self._remove_stale_pacman_lock()
+            raise
         finally:
+            finished.set()
             if timer:
                 timer.cancel()
         if timed_out.is_set():
+            self._remove_stale_pacman_lock()
             tail.append(f"stopped after the time limit ({int(timeout)} s)")
             self.progress.log(f"{log_prefix}stopped after the time limit ({int(timeout)} s)")
             return 124, list(tail)
         return rc, list(tail)
+
+    @staticmethod
+    def _signal_group(p, sig):
+        try:
+            os.killpg(p.pid, sig)
+        except OSError:                                # the group is already gone
+            pass
+
+    def _remove_stale_pacman_lock(self):
+        """A pacman stopped in the middle leaves db.lck in the new system. With no pacman running there, remove it."""
+        lock = f"{self.mnt}/var/lib/pacman/db.lck"
+        if not os.path.exists(lock):
+            return
+        want = os.path.realpath(self.mnt)
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    if f.read().strip() != "pacman":
+                        continue
+                if os.path.realpath(f"/proc/{pid}/root") == want:
+                    return                             # a pacman really runs in the new system: leave its lock
+            except OSError:
+                continue
+        try:
+            os.remove(lock)
+            self.progress.log("removed the stale pacman lock left by the stopped command")
+        except OSError:
+            pass
 
     def _stream_line(self, raw: bytes, tail: deque, on_line, log_prefix: str):
         line = ANSI.sub("", raw.decode("utf-8", "replace"))

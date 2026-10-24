@@ -70,6 +70,7 @@ class Disk:
     first_usable: int = 1 * MIB
     last_usable: int = 0
     raw_fs: str = ""               # a file system written straight onto the disk, with no partition table
+    raid_member: str = ""          # why this disk belongs to a RAID / device-mapper set ("" = it does not)
     partitions: list = field(default_factory=list)
 
     def free_regions(self, min_size: int = 1 * MIB):

@@ -221,10 +221,14 @@ def plan(snap: Snapshot, choices: Choices) -> Plan:
         raise HardStop("UNKNOWN_DISK", f"Disk {choices.target_disk} does not exist.")
     if target.installer_media:
         raise HardStop("INSTALLER_MEDIA", f"{target.id} is the installer's own USB stick.")
-    if re.match(r"^md\d", os.path.basename(target.id)):
+    is_md = re.match(r"^md\d", os.path.basename(target.id))
+    if is_md or target.raid_member:
+        what = (f"{target.id} is a RAID volume (Intel RST or software RAID)" if is_md else
+                f"{target.id} is a member of a RAID set ({target.raid_member}); writing to it could break the array "
+                "that may hold Windows")
         raise HardStop(
             "RAID_VOLUME",
-            f"{target.id} is a RAID volume (Intel RST or software RAID), and TapkicH-OS cannot install onto it. If "
+            f"{what}, and TapkicH-OS cannot install onto it. If "
             "this computer's disks only show up as a RAID volume, do NOT just switch the firmware to AHCI: Windows "
             "would stop starting. In Windows first run `bcdedit /set {current} safeboot minimal`, restart, switch the "
             "storage mode to AHCI in the firmware, let Windows start once (Safe Mode), run `bcdedit /deletevalue "

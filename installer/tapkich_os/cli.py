@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .detect import detect_system
@@ -83,6 +84,7 @@ def _apply(args) -> int:
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, _interrupt)
     signal.signal(signal.SIGHUP, _interrupt)
+    signal.signal(signal.SIGINT, signal.default_int_handler)    # the wizard ignores Ctrl-C meanwhile, and that is inherited
     overrides = frozenset(args.override)
     confirmed = None
     if args.confirmed_snapshot:
@@ -90,7 +92,7 @@ def _apply(args) -> int:
             with open(args.confirmed_snapshot) as f:
                 confirmed = Snapshot.from_json(f.read())
         except (OSError, ValueError, KeyError, TypeError) as e:     # e.g. a half-written file: nothing is written then
-            print(json.dumps({"ok": False, "code": "CRASH", "message": "Could not read the disk list confirmed on the "
+            _say(json.dumps({"ok": False, "code": "CRASH", "message": "Could not read the disk list confirmed on the "
                               f"review screen ({type(e).__name__}). Nothing was written; start again."}))
             return 3
     prog = Progress(sys.stdout if args.progress else None)
@@ -114,12 +116,12 @@ def _apply(args) -> int:
             prog.stop_heartbeat()                       # nothing may interleave with the final result line
     except PlanError as e:
         prog.log(f"STOPPED by planner [{e.code}] {e.message}")
-        print(json.dumps({"ok": False, "code": e.code, "message": e.message}))
+        _say(json.dumps({"ok": False, "code": e.code, "message": e.message}))
         return 2
     except ApplyError as e:
         prog.log(f"FAILED [{e.code}] {e.message} (rolled_back={e.rolled_back})")
-        print(json.dumps({"ok": False, "code": e.code, "message": e.message, "rolled_back": e.rolled_back,
-                          "backup_dir": e.backup_dir}))
+        _say(json.dumps({"ok": False, "code": e.code, "message": e.message, "rolled_back": e.rolled_back,
+                         "backup_dir": e.backup_dir}))
         return 3
     except KeyboardInterrupt as e:                      # Ctrl-C / SIGTERM: apply() has already tried the rollback
         rolled_back = getattr(e, "rolled_back", None)   # None: stopped before anything was written
@@ -128,19 +130,27 @@ def _apply(args) -> int:
             "The disk layout was put back as it was." if rolled_back else
             "The disk layout could not be fully restored." if rolled_back is False else
             "Nothing was written to the disks.")
-        print(json.dumps({"ok": False, "code": "INTERRUPTED", "message": message, "rolled_back": rolled_back,
-                          "backup_dir": getattr(e, "backup_dir", None) or args.backup_dir}))
+        _say(json.dumps({"ok": False, "code": "INTERRUPTED", "message": message, "rolled_back": rolled_back,
+                         "backup_dir": getattr(e, "backup_dir", None) or args.backup_dir}))
         return 130
     except Exception as e:                              # never leave the wizard without a reason to show
         prog.log(f"CRASH {type(e).__name__}: {e}")
-        print(json.dumps({"ok": False, "code": "CRASH", "message": f"The installer hit an unexpected error: {type(e).__name__}: {e}"}))
+        _say(json.dumps({"ok": False, "code": "CRASH", "message": f"The installer hit an unexpected error: {type(e).__name__}: {e}"}))
         return 3
     prog.log("apply: OK")
     prog.close()
-    print(json.dumps({"ok": True, "created": result.created, "backup_dir": result.backup_dir,
-                      "windows_esps_verified": result.windows_esps_verified, "later_stages": result.skipped,
-                      "notes": list(getattr(hook, "notes", []) or [])}))
+    _say(json.dumps({"ok": True, "created": result.created, "backup_dir": result.backup_dir,
+                     "windows_esps_verified": result.windows_esps_verified, "later_stages": result.skipped,
+                     "notes": list(getattr(hook, "notes", []) or [])}))
     return 0
+
+
+def _say(line: str):
+    """Print a result line; a wizard that is already gone (broken pipe) must not turn the end of the install into a crash."""
+    try:
+        print(line, flush=True)
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), 1)          # so the interpreter's exit flush stays quiet
 
 
 def main(argv=None) -> int:

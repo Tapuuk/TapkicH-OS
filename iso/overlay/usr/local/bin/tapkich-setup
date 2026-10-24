@@ -213,7 +213,7 @@ latin_off() { ((${MAIN_NONLATIN:-0})) && [[ -z $ANSWERS ]] && keyboard_apply "$k
 latin_hint() { ((${MAIN_NONLATIN:-0})) && echo " This screen uses the US keyboard (Latin letters)."; }
 
 # Names of system accounts and groups: the same list as RESERVED_USERS in installer/tapkich_os/system.py (keep in sync).
-RESERVED_USERS=" root bin daemon mail ftp http nobody dbus uuidd dnsmasq rpc ntp avahi colord polkitd rtkit sddm git geoclue usbmux flatpak nm-openconnect nm-openvpn alpm tss games saned brltty cups wheel adm sys users gamemode "
+RESERVED_USERS=" root bin daemon mail ftp http nobody dbus uuidd dnsmasq rpc ntp avahi colord polkitd rtkit sddm git geoclue usbmux flatpak nm-openconnect nm-openvpn alpm tss games saned brltty cups wheel adm sys users gamemode audio video input render kvm disk storage optical log lock lp network power scanner tty utmp uucp rfkill kmem proc floppy sgx nvidia-persistenced "
 username_reserved() { [[ $RESERVED_USERS == *" $1 "* || $1 == systemd-* ]]; }
 
 username_form() { latin_on; username_screen; local rc=$?; latin_off; return $rc; }
@@ -782,6 +782,11 @@ install_system() {
   # While installing, typed keys (a held ENTER!) must not echo: the echoed lines scroll the progress bar away.
   [[ -n $SAVED_TTY ]] && stty -echo 2>/dev/null
   ((tty)) && { h2 "Installing TapkicH-OS"; blank; printf '\e[?25l'; bar_draw 0 "Starting" "" 1; }
+  # Ctrl-C / hang-up while installing: the installer gets the signal too (it is in this process group) and rolls
+  # back. This script must stay and read until its result line, or the rollback runs unseen and a second installer
+  # could start on top of it. So the signals are ignored here until the result is in.
+  local old_traps; old_traps=$(trap -p INT HUP TERM)
+  trap "" INT HUP TERM
   # Events (JSON lines) drive the bar; the last non-event line is the result. Errors go to the log.
   while IFS= read -r line; do
     if [[ $line == '{"event"'* ]]; then
@@ -795,6 +800,7 @@ install_system() {
       out=$line
     fi
   done < <(tapkich-installer "${args[@]}" 2>>/var/log/tapkich-os-install.log)
+  trap - INT HUP TERM; [[ -n $old_traps ]] && eval "$old_traps"
   ((tty)) && { printf '\e[?25h'; echo; }
   if [[ -n $SAVED_TTY ]]; then                      # give the terminal back, and throw away whatever was typed meanwhile
     stty "$SAVED_TTY" 2>/dev/null

@@ -323,6 +323,23 @@ def _disk_ancestors(node: str) -> set:
 _SKIP_DEVICE = re.compile(r"^(loop|ram|zram|sr|fd|nbd|dm-)|^mmcblk\d+(boot\d+|rpmb)$")
 
 
+def raid_member_reason(name: str, sysblock: str = "/sys/block", run=_run) -> str:
+    """Why the whole disk `name` (e.g. "sda") is a member of a RAID set, or "" for a normal disk. Writing one member
+    can break the array (Intel RST / mdraid, which often holds Windows). Two signs: something holds the disk in
+    /sys/block/<d>/holders (md, device-mapper), or the RAID metadata on it (blkid TYPE ending in _raid_member)."""
+    try:
+        holders = sorted(os.listdir(f"{sysblock}/{name}/holders"))
+    except OSError:
+        holders = []
+    if holders:
+        return f"in use by {', '.join(holders)}"
+    try:
+        fstype = run(["blkid", "-p", "-s", "TYPE", "-o", "value", f"/dev/{name}"]).stdout.strip()
+    except OSError:
+        return ""
+    return f"{fstype} metadata" if fstype.endswith("_raid_member") else ""
+
+
 def detect_system() -> Snapshot:
     """Snapshot of the running machine (live ISO). Needs root; read-only. A device that cannot be read (empty
     card-reader slot, broken disk) is skipped and logged instead of stopping detection of all the others."""
@@ -341,6 +358,7 @@ def detect_system() -> Snapshot:
             skipped.append(f"{path}: {e}")
             continue
         d.installer_media = path in installer
+        d.raid_member = raid_member_reason(name)
         for attr in ("model", "serial"):
             f = f"/sys/block/{name}/device/{attr}"
             if os.path.exists(f):

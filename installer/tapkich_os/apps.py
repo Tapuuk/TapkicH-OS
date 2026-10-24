@@ -54,6 +54,9 @@ AUR_APPS = [
 ]
 # Built without compression: packing Proton-GE's 1.5 GB into a .zst took minutes with no visible progress.
 UNCOMPRESSED = {"proton-ge-custom-bin"}
+# Free space the new root needs before an app is built (Proton-GE: ~1.5 GB download, build tree and package); with
+# less, the app is skipped and the finish screen says how to install it later.
+AUR_SPACE_NEEDED = {"proton-ge-custom-bin": 4 * 1024 ** 3}
 AUR_TIMEOUT = 20 * 60                  # seconds; an AUR step that takes longer is stopped and skipped, never hangs
 
 # What opens what. Waterfox is the browser.
@@ -96,6 +99,13 @@ def render_mimeapps() -> str:
 
 SUDO_INSTALL_FILE = "/etc/sudoers.d/99-tapkich-install"
 SUDO_INSTALL_RULE = "%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n"
+
+
+def retry_hint(pkg: str) -> str:
+    """What to run later, on the installed system, for an AUR app that did not install."""
+    if pkg == "proton-ge-custom-bin":
+        return "paru -S proton-ge-custom-bin (or install Proton-GE from ProtonUp-Qt)"
+    return f"paru -S {pkg}"
 
 
 def paru_command(pkg: str, rebuild: bool = False) -> str:
