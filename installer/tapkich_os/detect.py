@@ -354,8 +354,7 @@ def in_use_reason(name: str, sysblock: str = "/sys/block") -> str:
 
 def _no_medium(name: str, sysblock: str = "/sys/block") -> bool:
     try:
-        with open(f"{sysblock}/{name}/size") as f:
-            return f.read().strip() == "0"
+        return open(f"{sysblock}/{name}/size").read().strip() == "0"
     except OSError:
         return False
 
