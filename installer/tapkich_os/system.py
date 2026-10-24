@@ -307,9 +307,9 @@ def render_limine_conf(root_uuid: str, windows_esps: list, theme: dict | None = 
     t = {**DEFAULT_THEME, **(theme or {})}
     flags = "rootflags=subvol=@ " if root_fs == "btrfs" else ""          # only btrfs uses subvolumes
     if luks_uuid and luks_style == "udev":
-        root = f"cryptdevice=UUID={luks_uuid}:cryptroot root=/dev/mapper/cryptroot"
+        root = f"cryptdevice=UUID={luks_uuid}:cryptroot:allow-discards root=/dev/mapper/cryptroot"     # (TRIM reaches the SSD)
     elif luks_uuid:
-        root = f"rd.luks.name={luks_uuid}=cryptroot root=/dev/mapper/cryptroot"
+        root = f"rd.luks.name={luks_uuid}=cryptroot rd.luks.options=discard root=/dev/mapper/cryptroot"   # (TRIM reaches the SSD)
     else:
         root = f"root=UUID={root_uuid}"
     cmd = f"{root} {flags}rw quiet loglevel=3 {extra_cmdline}".strip()
@@ -455,6 +455,52 @@ WantedBy=multi-user.target
 
 # ---------------------------------------------------------------- the installer hook
 
+def localized_pictures_dir(home: str) -> str | None:
+    """The user's pictures folder from ~/.config/user-dirs.dirs (XDG_PICTURES_DIR="$HOME/Картинки"), as an absolute
+    path inside `home`, or None when the file is missing, the folder is switched off or it lies outside the home."""
+    try:
+        with open(f"{home}/.config/user-dirs.dirs", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = re.search(r'^XDG_PICTURES_DIR="([^"\n]*)"', text, re.M)
+    if not m:
+        return None
+    path = os.path.normpath(m.group(1).replace("$HOME", home, 1))
+    if not path.startswith(home.rstrip("/") + "/"):
+        return None
+    return path
+
+
+def move_wallpapers_to_localized_pictures(home: str) -> str | None:
+    """Caelestia reads <pictures folder>/Wallpapers, and the pictures folder is translated (Картинки, Bilder, ...).
+    /etc/skel puts our wallpapers in ~/Pictures/Wallpapers: move them to the real folder (merging when it already has
+    some) and drop ~/Pictures when it is then empty. Returns the new folder, or None when nothing had to move.
+    Everything created keeps the owner of the home folder."""
+    pictures = localized_pictures_dir(home)
+    english = os.path.join(home, "Pictures")
+    src = os.path.join(english, "Wallpapers")
+    if not pictures or pictures == english or not os.path.isdir(src):
+        return None
+    owner = os.stat(home)
+    dst = os.path.join(pictures, "Wallpapers")
+    for d in (pictures, dst):
+        if not os.path.isdir(d):
+            os.makedirs(d)
+            os.chown(d, owner.st_uid, owner.st_gid)
+    for name in sorted(os.listdir(src)):
+        target = os.path.join(dst, name)
+        if os.path.lexists(target):
+            continue                                   # theirs stays; ours is dropped below
+        os.rename(os.path.join(src, name), target)
+    shutil.rmtree(src, ignore_errors=True)
+    try:
+        os.rmdir(english)                              # only while empty: anything the user put there stays
+    except OSError:
+        pass
+    return dst
+
+
 class SystemInstaller:
     def __init__(self, snap: Snapshot, plan: Plan, answers: SystemAnswers, *, mnt: str = MNT, run=_run,
                  theme: dict | None = None):
@@ -491,6 +537,7 @@ class SystemInstaller:
         self._refresh_aur()                                # only the AUR packages that are outdated
         self._clean_build_cache()
         self._caelestia()                                  # the desktop: always, not only with the extra apps
+        self._localize_wallpapers()
         self._clean_build_cache()
         if self.a.extra_apps:
             self._aur_apps()
@@ -692,7 +739,7 @@ class SystemInstaller:
             # gamemode's limits.d file lets the group raise game priority
             f"{{ getent group gamemode >/dev/null && usermod -aG gamemode {a.username} || true; }} && "
             "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel && chmod 440 /etc/sudoers.d/10-wheel && "
-            f"dconf update && systemctl enable NetworkManager systemd-timesyncd sddm bluetooth power-profiles-daemon {gaming.RESET_UNIT} && systemctl set-default graphical.target")
+            f"dconf update && systemctl enable NetworkManager systemd-timesyncd fstrim.timer sddm bluetooth power-profiles-daemon {gaming.RESET_UNIT} && systemctl set-default graphical.target")
         if a.wifi_ssid:                                                          # keep the install-time Wi-Fi
             import uuid
             nm = f"{self.mnt}/etc/NetworkManager/system-connections"
@@ -1010,6 +1057,19 @@ class SystemInstaller:
         tail.append(line)
         self.progress.log(log_prefix + line)
         on_line(line)
+
+    def _localize_wallpapers(self):
+        """Non-English installs: xdg-user-dirs names the pictures folder in the user's language and Caelestia reads
+        <that folder>/Wallpapers, so the skel copy in ~/Pictures is moved there. Best effort: a failure only logs."""
+        try:
+            user = self.a.username
+            self.run(["arch-chroot", self.mnt, "runuser", "-u", user, "--", "env", f"LANG={self.a.locale}.UTF-8",
+                      "xdg-user-dirs-update"], check=False)
+            moved = move_wallpapers_to_localized_pictures(f"{self.mnt}/home/{user}")
+            if moved:
+                self.progress.log(f"wallpapers: moved to {moved[len(self.mnt):]}")
+        except Exception as e:                                       # never fails the install
+            self.progress.log(f"wallpapers: could not move them to the localized folder ({type(e).__name__}: {e})")
 
     def _wallpapers(self):
         """Caelestia's wallpaper folder (~/Pictures/Wallpapers, via /etc/skel): its own stock wallpaper (from the
