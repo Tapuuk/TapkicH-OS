@@ -352,6 +352,14 @@ def in_use_reason(name: str, sysblock: str = "/sys/block") -> str:
     return f"in use by {', '.join(other)}" if other else ""
 
 
+def _no_medium(name: str, sysblock: str = "/sys/block") -> bool:
+    try:
+        with open(f"{sysblock}/{name}/size") as f:
+            return f.read().strip() == "0"
+    except OSError:
+        return False
+
+
 def detect_system() -> Snapshot:
     """Snapshot of the running machine (live ISO). Needs root; read-only. A device that cannot be read (empty
     card-reader slot, broken disk) is skipped and logged instead of stopping detection of all the others."""
@@ -363,6 +371,8 @@ def detect_system() -> Snapshot:
             continue
         path = f"/dev/{name}"
         sep = "p" if name[-1].isdigit() else ""
+        if _no_medium(name):              # empty card-reader slot: nothing to read, not an unreadable disk
+            continue
         try:
             d = read_disk(path, path, node_for_partition=lambda n, p=path, s=sep: f"{p}{s}{n}")
             d.removable = open(f"/sys/block/{name}/removable").read().strip() == "1"
