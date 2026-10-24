@@ -360,6 +360,17 @@ def _no_medium(name: str, sysblock: str = "/sys/block") -> bool:
         return False
 
 
+def report_skipped(skipped: list, out=None) -> None:
+    """Log the unreadable devices, one per line and under 100 columns (a long one-line list is unreadable on the console)."""
+    if not skipped:
+        return
+    out = out or sys.stderr
+    print("detect: skipped unreadable devices:", file=out)
+    for s in skipped:
+        s = " ".join(s.split())
+        print("  " + (s if len(s) <= 96 else s[:93] + "..."), file=out)
+
+
 def detect_system() -> Snapshot:
     """Snapshot of the running machine (live ISO). Needs root; read-only. A device that cannot be read (empty
     card-reader slot, broken disk) is skipped and logged instead of stopping detection of all the others."""
@@ -390,8 +401,7 @@ def detect_system() -> Snapshot:
                 except OSError:
                     pass
         disks.append(d)
-    if skipped:
-        print("detect: skipped unreadable devices: " + "; ".join(skipped), file=sys.stderr)
+    report_skipped(skipped)
     nv = _run(["efibootmgr", "-v"]).stdout if shutil.which("efibootmgr") else ""
     fw = Firmware(uefi=os.path.isdir("/sys/firmware/efi"), secure_boot=_secure_boot(), rst_raid=rst_raid_mode())
     return Snapshot(disks=disks, nvram=parse_efibootmgr(nv), firmware=fw, skipped=skipped)
