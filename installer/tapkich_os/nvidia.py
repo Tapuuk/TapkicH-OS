@@ -152,8 +152,7 @@ def choose(gpus: list) -> dict:
         plan["note"] = (f"{nv[0].name}: NVIDIA's current driver no longer supports this card (Maxwell/Pascal/Volta). "
                         "The open nouveau driver is used, with its Vulkan driver (NVK), so games run, slower than on "
                         "NVIDIA's own driver. NVIDIA's legacy "
-                        f"580 driver is only in the AUR: `paru -S {LEGACY_AUR}` (unofficial packaging; see "
-                        "`tapkich doctor`).")
+                        f"580 driver is only in the AUR: `paru -S {LEGACY_AUR}` (unofficial packaging).")
     else:
         plan["note"] = f"{nv[0].name}: too old for any current NVIDIA driver; the open nouveau driver is used."
     return plan

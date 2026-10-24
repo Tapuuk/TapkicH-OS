@@ -7,3 +7,15 @@ post_install() {
 post_upgrade() {
   post_install
 }
+
+post_remove() {
+  # our os-release hook is gone with the package: give Arch its own file back (a link, as Arch ships it)
+  if grep -q '^ID=tapkich' /etc/os-release 2>/dev/null; then
+    ln -sf ../usr/lib/os-release /etc/os-release
+  fi
+  if [ -e /etc/tapkich-os/secureboot.conf ]; then
+    echo "tapkich-os: Secure Boot stays set up. sbctl's own hook keeps signing the kernel, but a changed limine.conf"
+    echo "  or Limine itself is no longer enrolled and signed: turn Secure Boot off in the firmware before changing them."
+  fi
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
