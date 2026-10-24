@@ -49,6 +49,7 @@ KEYBINDS = [
     ("kbCloseWindow", "SUPER + W", "close the window; Caelestia: SUPER + Q"),
     ("kbGoToWs", "SUPER", "SUPER + 1 ... 0: go to desktop 1 ... 10"),
     ("kbMoveWinToWs", "SUPER + SHIFT", "SUPER + SHIFT + 1 ... 0: move the window to desktop 1 ... 10; Caelestia: SUPER + ALT"),
+    ("kbMoveWinToWsSilent", "SUPER + ALT", "SUPER + ALT + 1 ... 0: move the window, stay here; Caelestia: SUPER + SHIFT"),
     ("kbTodoWs", "SUPER + SHIFT + T", "to-do workspace; Caelestia: SUPER + R"),
     ("kbBrowser", "SUPER + B", "web browser; Caelestia: SUPER + W"),
     ("kbFileExplorer", "SUPER + E", "file manager (Files); Windows-style"),
