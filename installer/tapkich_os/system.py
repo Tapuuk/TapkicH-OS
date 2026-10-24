@@ -261,8 +261,8 @@ def validate_answers(a: "SystemAnswers", zoneinfo: str = ZONEINFO) -> None:
     if not a.password or any(c in a.password for c in "\n\r\0") or len(a.password) > 1000:
         bad("password (empty, too long, or containing a line break)")
     if a.wifi_ssid:
-        if (any(ord(c) < 32 or ord(c) == 127 for c in a.wifi_ssid) or not 1 <= len(a.wifi_ssid.encode()) <= 32
-                or a.wifi_ssid != a.wifi_ssid.strip()):
+        # spaces at either end are allowed: they are part of some networks' names, and the keyfile keeps them (\s)
+        if any(ord(c) < 32 or ord(c) == 127 for c in a.wifi_ssid) or not 1 <= len(a.wifi_ssid.encode()) <= 32:
             bad("Wi-Fi network name")
         if a.wifi_password and (any(ord(c) < 32 or ord(c) == 127 for c in a.wifi_password)
                                 or not 8 <= len(a.wifi_password) <= 64):

@@ -537,8 +537,15 @@ wifi_connect() {
   if ((hidden)); then iwctl station "$dev" connect-hidden "$ssid" >/dev/null 2>&1
   else iwctl station "$dev" connect "$ssid" >/dev/null 2>&1; fi
   # joined = iwd says "connected" (a cable may already give internet, so the internet check alone proves nothing)
+  # and to this network: iwd can stay on an earlier one when this join fails (then a wrong password looked right)
+  local out now want
+  want=$(sed -E 's/^ +//; s/ +$//' <<<"$ssid")
   for ((i = 0; i < 15; i++)); do
-    iwctl station "$dev" show 2>/dev/null | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -Eq 'State +connected' && return 0
+    out=$(iwctl station "$dev" show 2>/dev/null | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')
+    if grep -Eq 'State +connected' <<<"$out"; then
+      now=$(sed -nE 's/^ *Connected network +//p' <<<"$out" | sed -E 's/ +$//')
+      [[ -z $now || $now == "$want" ]] && return 0
+    fi
     sleep 1
   done
   rm -f "$IWD_DIR/$fname.psk" "$IWD_DIR/$fname.open"                     # wrong password: do not keep it
