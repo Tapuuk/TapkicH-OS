@@ -81,6 +81,7 @@ on_mains() {{
   local s found=0
   for s in /sys/class/power_supply/*; do
     [[ -r $s/type ]] || continue
+    [[ -r $s/scope && $(<"$s/scope") == Device ]] && continue   # a wireless mouse or gamepad is not this computer's power
     case $(<"$s/type") in
       Mains) found=1; [[ $(<"$s/online") == 1 ]] && return 0 ;;
       Battery) found=1 ;;
@@ -127,7 +128,8 @@ OS_SESSION_SELECT_SCRIPT = f"""#!/bin/bash
 #   gamescope (or nothing)  -> back to Gaming Mode: from the desktop like the power-menu button; inside Gaming
 #       Mode there is nothing to do.
 # Anything else is treated as "to the desktop" (the safe direction: never a loop into Gaming Mode).
-in_gaming_mode() {{ pgrep -u "$(id -u)" -x gamescope >/dev/null || pgrep -u "$(id -u)" -f "gamescope-session-plus" >/dev/null; }}
+# (the session's own process, not any gamescope: a game started with `gamescope -- game` on the desktop is not Gaming Mode)
+in_gaming_mode() {{ pgrep -u "$(id -u)" -f "gamescope-session-plus" >/dev/null; }}
 case "${{1:-gamescope}}" in
   gamescope|gamescope-wayland)
     in_gaming_mode && exit 0
