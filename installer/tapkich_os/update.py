@@ -8,11 +8,11 @@
   4. AUR packages: paru -Sua (only what is not in a repository).
   5. Flatpak apps (Bazaar / Flathub).
 
-The GitHub repository is private for now, so the release files cannot be downloaded (GitHub answers 404). Until it is
-public, step 1 says calmly that TapkicH-OS updates are not published yet and the rest still runs. Once the repository
-is public, nothing else has to change: the next `tapkich update` finds the repository, adds [tapkich] to pacman.conf
-and takes over our files as the `tapkich-os` package. The one switch is `enabled` in /etc/tapkich-os/update.conf
-(auto = use it as soon as it is reachable; no = never).
+When the release files cannot be downloaded (GitHub is down, or the files are missing for a moment), step 1 says so
+calmly and the rest still runs: if [tapkich] is already in pacman.conf, pacman runs with a temporary configuration
+that leaves it out. Once the files are reachable again, the next `tapkich update` uses the repository again. The one
+switch is `enabled` in /etc/tapkich-os/update.conf (auto = use it as soon as it is reachable; no = never, and the
+[tapkich] block is removed from pacman.conf).
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -46,8 +47,10 @@ enabled = auto
 url = {url}
 """
 
-NOT_PUBLISHED = ("TapkicH-OS updates are not published yet (the project's repository is still private). "
-                 "Everything else is updated as usual.")
+NOT_PUBLISHED = "TapkicH-OS update files could not be found (try again later)"
+OFFLINE = "could not reach the TapkicH-OS update server (try again later)"
+USAGE = "usage: tapkich update [--yes]"
+YES_FLAGS = ("--yes", "-y", "--noconfirm")
 
 
 def render_conf(url: str = DEFAULT_URL) -> str:
@@ -90,6 +93,47 @@ def with_repo(pacman_conf: str, include: str = REPO_INCLUDE) -> str:
     return pacman_conf.rstrip("\n") + f"\n\n[{REPO_NAME}]\nInclude = {include}\n"
 
 
+def without_repo(pacman_conf: str, include: str = REPO_INCLUDE) -> str:
+    """pacman.conf without the exact [tapkich] block `with_repo` writes. Idempotent; touches nothing else."""
+    out = re.sub(rf"\n*^\[{REPO_NAME}\]\nInclude = {re.escape(include)}\n?", "\n", pacman_conf, flags=re.M)
+    return out.rstrip("\n") + "\n"
+
+
+def has_repo(pacman_conf: str) -> bool:
+    return re.search(rf"^\[{REPO_NAME}\]", pacman_conf, re.M) is not None
+
+
+def key_fingerprint(path: str = "") -> str:
+    """The fingerprint of our package-signing key, from the keyring files the package ships ('' if there is none)."""
+    from . import package
+    try:
+        with open(path or os.path.join(package.KEY_SOURCE, "tapkich-trusted")) as f:
+            for line in f:
+                fp = line.split(":", 1)[0].strip()
+                if re.fullmatch(r"[0-9A-Fa-f]{40}", fp):
+                    return fp.upper()
+    except OSError:
+        pass
+    return ""
+
+
+def _quiet(cmd: list) -> int:
+    try:
+        return subprocess.run(cmd, capture_output=True).returncode
+    except OSError:
+        return 127
+
+
+def key_in_keyring(fingerprint: str, run=_quiet) -> bool:
+    """Is our signing key in pacman's keyring? If not, populate it from the shipped keyring files once."""
+    if not fingerprint:
+        return False
+    if run(_sudo(["pacman-key", "--list-keys", fingerprint])) == 0:
+        return True
+    run(_sudo(["pacman-key", "--populate", REPO_NAME]))
+    return run(_sudo(["pacman-key", "--list-keys", fingerprint])) == 0
+
+
 def probe(url: str, timeout: float = 15) -> str:
     """Is the repository published? 'published', 'not-published' (404 / 401 / 403: private or not there yet),
     or 'offline' (cannot reach the server)."""
@@ -107,6 +151,7 @@ def probe(url: str, timeout: float = 15) -> str:
 class Step:
     def __init__(self, name: str):
         self.name, self.result, self.note = name, "skipped", ""
+        self.skip_repo = False        # [tapkich] is in pacman.conf but cannot be used this time
 
 
 def _say(text: str = "") -> None:
@@ -151,7 +196,8 @@ def qt_rebuild_packages(version_text: str, installed) -> list:
 
 
 def rebuild_command(pkgs: list, yes: bool) -> list:
-    return ["paru", "-S", "--rebuild", *pkgs] + (["--noconfirm"] if yes else [])
+    # --aur: every target comes from the AUR, so paru builds it instead of reusing a same-named [tapkich] binary
+    return ["paru", "-S", "--aur", "--rebuild", *pkgs] + (["--noconfirm"] if yes else [])
 
 
 def qt_step(yes: bool, run=_run) -> Step:
@@ -175,49 +221,92 @@ def qt_step(yes: bool, run=_run) -> Step:
     return s
 
 
-def channel_step(conf: dict, pacman_conf_path: str = PACMAN_CONF) -> Step:
-    """Make [tapkich] part of pacman's repositories when it is published. Never an error wall."""
+def channel_step(conf: dict, pacman_conf_path: str = PACMAN_CONF, probe_fn=None, fingerprint=key_fingerprint,
+                 run=_quiet, write=None) -> Step:
+    """Make [tapkich] part of pacman's repositories when it is published and signed with a key pacman knows. When it
+    cannot be used while it is already configured, `skip_repo` tells main to run pacman without it. Never an error wall."""
+    write = write or _write_as_root
+    probe_fn = probe_fn or probe
     s = Step("TapkicH-OS")
-    if conf["enabled"] == "no":
-        s.note = f"switched off in {CONF}"
-        return s
-    state = probe(conf["url"])
-    if state == "not-published":
-        s.note = NOT_PUBLISHED
-        return s
-    if state == "offline":
-        s.note = "could not reach the TapkicH-OS update server; try again later"
-        return s
     try:
         with open(pacman_conf_path) as f:
             current = f.read()
     except OSError:
         s.result, s.note = "failed", f"cannot read {pacman_conf_path}"
         return s
-    ok = _write_as_root(REPO_INCLUDE, render_include(conf["url"]))
+    configured = has_repo(current)
+    if conf["enabled"] == "no":
+        s.note = f"switched off in {CONF}"
+        if configured:
+            if write(pacman_conf_path, without_repo(current)):
+                s.note += "; the repository was removed from pacman.conf"
+            else:
+                s.skip_repo = True
+        return s
+    state = probe_fn(conf["url"])
+    reason = ""
+    if state == "not-published":
+        reason = NOT_PUBLISHED
+    elif state == "offline":
+        reason = OFFLINE
+    elif not key_in_keyring(fingerprint(), run):
+        reason = "the TapkicH-OS signing key is not in pacman's keyring"
+    if reason:
+        s.note, s.skip_repo = reason, configured
+        return s
+    ok = write(REPO_INCLUDE, render_include(conf["url"]))
     new = with_repo(current)
     if ok and new != current:
-        ok = _write_as_root(pacman_conf_path, new)
+        ok = write(pacman_conf_path, new)
     s.result = "ok" if ok else "failed"
     s.note = "the TapkicH-OS repository is on" if ok else "could not add the TapkicH-OS repository"
     return s
 
 
-def pacman_command(adopt: bool) -> list:
+def _with_config(cmd: list, config: str) -> list:
+    return [cmd[0], "--config", config, *cmd[1:]] if config else cmd
+
+
+def pacman_command(adopt: bool, config: str = "") -> list:
     """The full system upgrade. On the first update after the repository is published, the tapkich-os package joins
     the same transaction (never a partial upgrade) and may replace the files the installer wrote."""
     if not adopt:
-        return ["pacman", "-Syu"]
-    return ["pacman", "-Syu", "--needed", PACKAGE, *[a for p in adopt_paths() for a in ("--overwrite", p)]]
+        return _with_config(["pacman", "-Syu"], config)
+    return _with_config(["pacman", "-Syu", "--needed", PACKAGE,
+                         *[a for p in adopt_paths() for a in ("--overwrite", p)]], config)
 
 
-def keyring_command() -> list:
+def keyring_command(config: str = "") -> list:
     """Refresh the signing keys first: an install that updates months later can fail on outdated keyring signatures."""
-    return ["pacman", "-Sy", "--needed", "archlinux-keyring"]
+    return _with_config(["pacman", "-Sy", "--needed", "archlinux-keyring"], config)
+
+
+def _refresh_sudo() -> None:
+    """Builds can outlast sudo's password timestamp: renew it before the next root step."""
+    if os.geteuid() != 0 and shutil.which("sudo"):
+        _run(["sudo", "-v"])
+
+
+def temp_pacman_conf() -> str:
+    """A copy of pacman.conf without the [tapkich] block, for this run only. Returns its path ('' if it failed)."""
+    try:
+        with open(PACMAN_CONF) as f:
+            text = without_repo(f.read())
+        fd, path = tempfile.mkstemp(prefix="tapkich-pacman-", suffix=".conf")
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(path, 0o644)
+        return path
+    except OSError:
+        return ""
 
 
 def main(argv=None) -> int:
-    yes = "--yes" in (argv or [])                     # unattended: no questions from pacman or paru
+    args = list(argv or [])
+    if any(a not in YES_FLAGS for a in args):
+        print(USAGE, file=sys.stderr)
+        return 2
+    yes = bool(args)                                  # unattended: no questions from pacman or paru
     conf = read_conf()
     steps = []
     _say("Updating everything: TapkicH-OS, the system, AUR packages and Flatpak apps. You may be asked for your password.")
@@ -229,14 +318,25 @@ def main(argv=None) -> int:
 
     _head("System packages (pacman)")
     s = Step("System packages")
-    # the keyring step and the full upgrade belong together (-Sy alone is a partial upgrade); a failed keyring step
-    # does not stop the upgrade
-    krc = _run(_sudo(keyring_command() + (["--noconfirm"] if yes else [])))
-    if krc != 0:
-        _say("  the signing keys could not be refreshed first; continuing with the upgrade")
-    rc = _run(_sudo(pacman_command(adopt=ch.result == "ok" and not _installed(PACKAGE)) + (["--noconfirm"] if yes else [])))
-    s.result = "ok" if rc == 0 else "failed"
+    config = temp_pacman_conf() if ch.skip_repo else ""
+    if ch.skip_repo and not config:
+        s.result, s.note = "failed", "could not prepare pacman's configuration without the TapkicH-OS repository"
+        _say("  " + s.note)
+    else:
+        # the keyring step and the full upgrade belong together (-Sy alone is a partial upgrade); a failed keyring step
+        # does not stop the upgrade
+        krc = _run(_sudo(keyring_command(config) + (["--noconfirm"] if yes else [])))
+        if krc != 0:
+            _say("  the signing keys could not be refreshed first; continuing with the upgrade")
+        rc = _run(_sudo(pacman_command(adopt=ch.result == "ok" and not _installed(PACKAGE), config=config)
+                        + (["--noconfirm"] if yes else [])))
+        s.result = "ok" if rc == 0 else "failed"
     steps.append(s)
+    if config:
+        try:
+            os.unlink(config)
+        except OSError:
+            pass
 
     _head("Shell packages (rebuilt after a Qt update)")
     steps.append(qt_step(yes))
@@ -257,6 +357,7 @@ def main(argv=None) -> int:
     _head("Flatpak apps")
     s = Step("Flatpak apps")
     if shutil.which("flatpak"):
+        _refresh_sudo()
         rc1 = _run(_sudo(["flatpak", "update", "--system", "-y", "--noninteractive"]))
         rc2 = _run(["flatpak", "update", "--user", "-y", "--noninteractive"])
         s.result = "ok" if rc1 == 0 and rc2 == 0 else "failed"
@@ -267,6 +368,9 @@ def main(argv=None) -> int:
     _say("\nSummary")
     for st in steps:
         mark = {"ok": "done   ", "failed": "FAILED ", "skipped": "skipped"}[st.result]
+        if st.skip_repo:
+            _say(f"  {mark} {st.name}: TapkicH-OS updates skipped this time: {st.note}; the rest updated")
+            continue
         _say(f"  {mark} {st.name}" + (f": {st.note}" if st.note and st.result != "ok" else ""))
     failed = [st for st in steps if st.result == "failed"]
     if failed:
