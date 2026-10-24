@@ -43,6 +43,10 @@ sed -i \
   -e 's/^iso_application=.*/iso_application="TapkicH-OS installer"/' \
   "$P/profiledef.sh"
 echo "tapkich-os" > "$P/airootfs/etc/hostname"
+# the commit this ISO was built from (with -dirty when the tree had uncommitted changes)
+mkdir -p "$P/airootfs/usr/share/tapkich-os"
+{ git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown; } | tr -d '\n' > "$P/airootfs/usr/share/tapkich-os/build-commit"
+[[ -z $(git -C "$REPO" status --porcelain -- installer packaging iso theme LICENSE 2>/dev/null) ]] || printf -- '-dirty' >> "$P/airootfs/usr/share/tapkich-os/build-commit"
 
 
 # 4b. No Arch welcome text or artwork: empty login message (the installer starts right away), plain violet menu

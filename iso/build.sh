@@ -8,6 +8,14 @@ WORK=/root/tapkich-os-build
 [[ ${1:-} == selftest ]] && export SELFTEST=1
 [[ ${1:-} == autoinstall ]] && export SELFTEST=2
 
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="*"   # the checkout is owned by the Windows user
+# TAPKICH_RELEASE=1: a release ISO is built only from a clean tree at the pushed origin/main commit
+if [[ ${TAPKICH_RELEASE:-0} == 1 ]]; then
+  [[ -z $(git -C "$REPO" status --porcelain -- installer packaging iso theme LICENSE) ]] || { echo "release build refused: uncommitted changes in installer packaging iso theme LICENSE"; exit 1; }
+  git -C "$REPO" fetch -q origin main 2>/dev/null || true
+  [[ $(git -C "$REPO" rev-parse HEAD) == $(git -C "$REPO" rev-parse origin/main) ]] || { echo "release build refused: HEAD is not origin/main (push the commit first)"; exit 1; }
+fi
+
 rm -rf "$WORK/profile" "$WORK/work"
 mkdir -p "$WORK" "$REPO/out"
 cp -a /usr/share/archiso/configs/releng "$WORK/profile"
@@ -23,4 +31,5 @@ name=$(basename "$iso" .iso)
 # Keep the ISO on the Linux filesystem (copying 1.6 GB over /mnt/c can run out of memory in WSL).
 mkdir -p "$WORK/iso"
 cp "$iso" "$WORK/iso/$name.iso"
+git -C "$REPO" rev-parse HEAD > "$WORK/iso/$name.commit"       # read by tools/publish-iso.sh
 echo "ISO: $WORK/iso/$name.iso"

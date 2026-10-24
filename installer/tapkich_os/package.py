@@ -48,6 +48,8 @@ When = PostTransaction
 Exec = /bin/sh -c 'rm -f /etc/os-release && cp /usr/share/tapkich-os/os-release /etc/os-release'
 """
 
+# Does nothing under Secure Boot (the Secure Boot refresh hook installs, enrolls and signs Limine itself; a stock copy
+# here would replace the signed one first) and unless /boot really is the mounted EFI partition.
 LIMINE_HOOK = """[Trigger]
 Operation = Install
 Operation = Upgrade
@@ -57,7 +59,7 @@ Target = limine
 [Action]
 Description = Updating Limine on the TapkicH-OS EFI partition (only /boot, never another disk's ESP)...
 When = PostTransaction
-Exec = /bin/sh -c 'install -D /usr/share/limine/BOOTX64.EFI /boot/EFI/limine/limine_x64.efi && install -D /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI'
+Exec = /bin/sh -c 'if [ ! -e /etc/tapkich-os/secureboot.conf ] && mountpoint -q /boot && [ -d /boot/EFI/limine ]; then install -D /usr/share/limine/BOOTX64.EFI /boot/EFI/limine/limine_x64.efi && install -D /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI; fi'
 """
 
 
