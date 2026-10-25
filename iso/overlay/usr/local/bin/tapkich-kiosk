@@ -14,7 +14,7 @@ SYSFS=${TAPKICH_SYSFS:-/sys}
 gpu_ready() {
     local card drv real=1
     for card in "$SYSFS"/class/drm/card[0-9]*; do
-        [[ -e $card && $card != *-* ]] || continue
+        [[ -e $card && ${card##*/} != *-* ]] || continue          # cardN only, not its connectors (cardN-HDMI-A-1)
         drv=$(basename "$(readlink -f "$card/device/driver" 2>/dev/null)")
         case $drv in
             simple-framebuffer | simpledrm | efidrm | efi-framebuffer | vesadrm | vesa-framebuffer | ofdrm | "") return 1 ;;
