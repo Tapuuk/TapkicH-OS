@@ -10,4 +10,12 @@ jq -r --arg main "$main" '.[] | select(.name != $main and (.mirrorOf // "none") 
 while read -r name; do
     hyprctl eval "hl.monitor({ output = \"$name\", mode = \"preferred\", position = \"auto\", scale = 1, mirror = \"$main\" })" >/dev/null 2>&1 || true
 done
+# For a report from real hardware: what each screen ended up as, and whether the kernel really switched it on
+# (a mirror on a second GPU that cannot copy the picture stays dark although Hyprland lists it as a mirror).
+{
+    echo "screens after mirroring (main: $main):"
+    for c in "${TAPKICH_SYSFS:-/sys}"/class/drm/card*-*; do
+        [[ -e $c/status ]] && echo "  ${c##*/}: $(cat "$c/status") $(cat "$c/enabled" 2>/dev/null)"
+    done
+} >>"${TAPKICH_KIOSK_LOG:-/run/tapkich-kiosk.log}" 2>/dev/null
 exit 0

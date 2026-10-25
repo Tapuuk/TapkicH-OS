@@ -5,15 +5,37 @@
 # working graphics must still be installable, and tty1 must never end at a bare shell).
 LOG=/run/tapkich-kiosk.log
 DONE=/run/tapkich-kiosk.done
-rm -f "$DONE"
-# Real GPU drivers load a moment after boot: let udev finish, then give the graphics device up to 5 more seconds.
+SYSFS=${TAPKICH_SYSFS:-/sys}
+
+# Until the real GPU driver (amdgpu, i915, nouveau, ...) has loaded, the only graphics device is the firmware's
+# framebuffer (simpledrm), and it shows only the screen the firmware lit: on a laptop the built-in panel, never an
+# external monitor. Hyprland does not move to a GPU that appears after it started, so it must start on the real one.
+# gpu_ready: a real GPU driver has a device and no firmware framebuffer device is left.
+gpu_ready() {
+    local card drv real=1
+    for card in "$SYSFS"/class/drm/card[0-9]*; do
+        [[ -e $card && $card != *-* ]] || continue
+        drv=$(basename "$(readlink -f "$card/device/driver" 2>/dev/null)")
+        case $drv in
+            simple-framebuffer | simpledrm | efidrm | efi-framebuffer | vesadrm | vesa-framebuffer | ofdrm | "") return 1 ;;
+            *) real=0 ;;
+        esac
+    done
+    return $real
+}
+[[ ${1:-} == gpu-ready ]] && { gpu_ready; exit; }
+
+rm -f "$DONE"; : >"$LOG"
+# Let udev load the drivers, then give a real GPU driver up to 15 more seconds. A GPU without a driver goes on with
+# the firmware framebuffer after that (the installer then shows on the screen the firmware lit).
 udevadm settle --timeout=10 2>/dev/null
-for ((i = 0; i < 25; i++)); do compgen -G '/dev/dri/card*' >/dev/null && break; sleep 0.2; done
-compgen -G '/dev/dri/card*' >/dev/null || { echo "no graphics device" >"$LOG"; exit 1; }
+for ((i = 0; i < 75; i++)); do gpu_ready && break; sleep 0.2; done
+gpu_ready || echo "no GPU driver after waiting; using the firmware framebuffer" >>"$LOG"
+compgen -G '/dev/dri/card*' >/dev/null || { echo "no graphics device" >>"$LOG"; exit 1; }
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 export XDG_SESSION_TYPE=wayland
 # The live system runs everything as root (the installer partitions disks). Hyprland refuses root unless told with
 # its own (oddly named) flag; acceptable here: a single-purpose installer window, no user data, nothing else runs.
-start-hyprland -- --i-am-really-stupid --config /usr/share/tapkich-os/kiosk/hyprland.lua >"$LOG" 2>&1
+start-hyprland -- --i-am-really-stupid --config /usr/share/tapkich-os/kiosk/hyprland.lua >>"$LOG" 2>&1
 [[ -e $DONE ]]
