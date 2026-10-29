@@ -38,7 +38,9 @@ id builder >/dev/null 2>&1 || useradd -m builder
 rm -f /etc/sudoers.d/tapkich-builder      # older builds gave `builder` a root-equivalent pacman rule: gone for good
 if [[ ! -d $CHROOT/root ]]; then
   mkdir -p "$CHROOT"
-  mkarchroot -C /etc/pacman.conf -M /etc/makepkg.conf "$CHROOT/root" base-devel
+  # only Arch's own repositories: a TapkicH-OS build host also lists [tapkich], whose key and Include file the chroot lacks
+  awk '/^\[/ { keep = ($0 ~ /^\[(options|core|extra|multilib)\]$/) } keep && !/^NoExtract/' /etc/pacman.conf > "$CHROOT/pacman.conf"
+  mkarchroot -C "$CHROOT/pacman.conf" -M /etc/makepkg.conf "$CHROOT/root" base-devel
 fi
 arch-nspawn "$CHROOT/root" pacman -Syu --noconfirm >/dev/null
 
