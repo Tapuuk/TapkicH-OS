@@ -363,6 +363,14 @@ def render_limine_conf(root_uuid: str, windows_esps: list, theme: dict | None = 
         f"    cmdline: {cmd}",
         f"    module_path: boot():/initramfs-{KERNEL}-fallback.img",
     ]
+    lines += windows_menu_lines(windows_esps, windows_boot_entry)
+    return "\n".join(lines) + "\n"
+
+
+def windows_menu_lines(windows_esps: list, windows_boot_entry: str = "") -> list:
+    """The Windows items at the end of limine.conf (each starts with a blank line). Also used by `tapkich restore
+    windows`, which puts them into an installed system's limine.conf when Windows' boot files came back later."""
+    lines = []
     if windows_boot_entry and len(windows_esps) == 1:
         lines += [
             "",
@@ -382,15 +390,21 @@ def render_limine_conf(root_uuid: str, windows_esps: list, theme: dict | None = 
             # by partition GUID, not by disk order: the Windows boot files may be on another disk
             f"    path: guid({guid}):/EFI/Microsoft/Boot/bootmgfw.efi",
         ]
-    return "\n".join(lines) + "\n"
+    return lines
 
 
-def windows_boot_entry(snap, esp_guids: list) -> str:
+def windows_menu_items(esps: list) -> list:
+    """[(label, partition GUID)] for the Windows boot partitions `esps`, in the order the menu lists them."""
+    return [("Windows" if i == 0 else f"Windows ({esp.disk})", esp.partuuid) for i, esp in enumerate(esps)]
+
+
+def windows_boot_entry(snap, esp_guids: list, nvram: list | None = None) -> str:
     """The firmware entry Limine may restart into for Windows: only with exactly one Windows boot partition, and only
-    if an entry called "Windows Boot Manager" points at it (efi_boot_entry finds entries by name)."""
+    if an entry called "Windows Boot Manager" points at it (efi_boot_entry finds entries by name). `nvram`: a fresher
+    boot list than the snapshot's."""
     if len(esp_guids) != 1:
         return ""
-    names = [e for e in getattr(snap, "nvram", []) if e.label == "Windows Boot Manager"]
+    names = [e for e in (getattr(snap, "nvram", []) if nvram is None else nvram) if e.label == "Windows Boot Manager"]
     if len(names) == 1 and names[0].partuuid.lower() == esp_guids[0].lower():
         return "Windows Boot Manager"
     return ""
@@ -1194,10 +1208,8 @@ class SystemInstaller:
     def _limine(self, root_uuid: str):
         boot = f"{self.mnt}/boot"
         t = self.theme
-        windows = []
         deleted = {o.target for o in self.plan.ops if o.kind == "DELETE"}
-        for i, esp in enumerate(e for e in windows_boot_esps(self.snap) if e.ref not in deleted):
-            windows.append(("Windows" if i == 0 else f"Windows ({esp.disk})", esp.partuuid))
+        windows = windows_menu_items([e for e in windows_boot_esps(self.snap) if e.ref not in deleted])
         boot_entry = windows_boot_entry(self.snap, [guid for _, guid in windows])
         self.windows_direct = bool(windows) and not boot_entry
         if self.windows_direct:

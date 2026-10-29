@@ -47,6 +47,14 @@ def current(boot: str = sb.BOOT) -> str | None:
     return LIMINE_DEFAULT if found else None
 
 
+def set_timeout_text(text: str, value: str) -> str:
+    new, n = _LINE.subn(lambda m: f"timeout: {value}{m.group(2)}", text, count=1)
+    if n == 0:                                        # no line yet: Limine's default is 5 s, so say it explicitly
+        eol = "\r\n" if "\r\n" in text else "\n"
+        new = f"timeout: {value}{eol}{text}"
+    return new
+
+
 def set_timeout(value: str, boot: str = sb.BOOT) -> list:
     """Rewrite the timeout line in every limine.conf that exists; returns the files written."""
     done = []
@@ -57,14 +65,42 @@ def set_timeout(value: str, boot: str = sb.BOOT) -> list:
                 text = f.read()
         except OSError:
             continue
-        new, n = _LINE.subn(lambda m: f"timeout: {value}{m.group(2)}", text, count=1)
-        if n == 0:                                    # no line yet: Limine's default is 5 s, so say it explicitly
-            eol = "\r\n" if "\r\n" in text else "\n"
-            new = f"timeout: {value}{eol}{text}"
         with open(path, "w", newline="") as f:
-            f.write(new)
+            f.write(set_timeout_text(text, value))
         done.append(path)
     return done
+
+
+def rewrite(change, boot: str = sb.BOOT, state_path: str = sb.STATE_FILE) -> tuple:
+    """Write `change(text)` into every limine.conf that exists. With Secure Boot set up the config's hash is enrolled
+    into Limine, so the boot files are re-signed; if that fails the old configs are put back. Returns (files written,
+    error text or "")."""
+    before = {}
+    for c in sb.LIMINE_CONFS:
+        try:
+            with open(f"{boot}/{c}", newline="") as f:
+                before[f"{boot}/{c}"] = f.read()
+        except OSError:
+            pass
+    for path, text in before.items():
+        with open(path, "w", newline="") as f:
+            f.write(change(text))
+    if before and os.path.isfile(state_path):          # Secure Boot set up: the new config must be hashed and enrolled
+        try:
+            sb.refresh(boot, state_path)
+        except (RuntimeError, OSError) as e:
+            restored = True
+            for path, text in before.items():          # the enrolled hash belongs to the old config: put it back
+                try:
+                    with open(path, "w", newline="") as f:
+                        f.write(text)
+                except OSError:
+                    restored = False
+            return list(before), (f"the boot files could not be re-signed: {e}\n"
+                                  + ("The old boot files were kept." if restored else
+                                     "Do not restart with Secure Boot on before this is fixed (run `sudo tapkich "
+                                     "secureboot refresh`)."))
+    return list(before), ""
 
 
 def main(args: list, boot: str = sb.BOOT, state_path: str = sb.STATE_FILE) -> int:
@@ -82,31 +118,13 @@ def main(args: list, boot: str = sb.BOOT, state_path: str = sb.STATE_FILE) -> in
     if value is None:
         print(f"tapkich: {args[1]!r} is not a number of seconds from 0 to 60 (or `no`)\n{USAGE}")
         return 2
-    before = {}
-    for c in sb.LIMINE_CONFS:                          # kept, so a failed re-signing can put the old configs back
-        try:
-            with open(f"{boot}/{c}", newline="") as f:
-                before[f"{boot}/{c}"] = f.read()
-        except OSError:
-            pass
-    if not set_timeout(value, boot):
+    written, error = rewrite(lambda text: set_timeout_text(text, value), boot, state_path)
+    if error:
+        print(f"tapkich: the countdown was not changed, {error}")
+        return 1
+    if not written:
         print("tapkich: no boot menu config found on /boot")
         return 1
-    if os.path.isfile(state_path):                     # Secure Boot set up: the new config must be hashed and enrolled
-        try:
-            sb.refresh(boot, state_path)
-        except (RuntimeError, OSError) as e:
-            restored = True
-            for path, text in before.items():          # the enrolled hash belongs to the old config: put it back
-                try:
-                    with open(path, "w", newline="") as f:
-                        f.write(text)
-                except OSError:
-                    restored = False
-            print(f"tapkich: the countdown was not changed, the boot files could not be re-signed: {e}\n"
-                  + ("The old boot files were kept." if restored else
-                     "Do not restart with Secure Boot on before this is fixed (run `sudo tapkich secureboot refresh`)."))
-            return 1
     print(f"Boot menu countdown: {value if value == 'no' else value + ' s'}")
     if value == "0":
         print(ZERO_WARNING)

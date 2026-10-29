@@ -5,6 +5,10 @@ Windows adds its entry again only when it starts, which it cannot if the firmwar
 one entry, at the END of the boot order (TapkicH-OS stays first), and touch nothing else: not Windows' files, not its
 boot partition, not any other entry.
 
+Then the Windows items of TapkicH-OS's own boot menu (limine.conf on /boot) are brought up to date. The installer
+writes them once, from the Windows boot partitions it saw; when those were missing or broken then and were repaired
+later, the menu had no Windows item until this command adds it.
+
 Pure helpers (find the target, decide, build the commands) are unit-tested with made-up data; `main(argv)` runs as root.
 """
 from __future__ import annotations
@@ -16,7 +20,8 @@ import subprocess
 import sys
 import textwrap
 
-from . import detect, planner
+from . import bootloader, detect, planner, system
+from . import secureboot_setup as sb
 
 LABEL = "Windows Boot Manager"        # Limine's Windows menu item finds the entry by exactly this name
 LOADER = "\\EFI\\Microsoft\\Boot\\bootmgfw.efi"
@@ -24,8 +29,6 @@ GIB = 1024 ** 3
 
 USAGE = "usage: tapkich restore windows [--check] [--yes] [--remove-stale] [--disk /dev/xxx --part N]"
 
-NOTE_LIMINE = ("If TapkicH-OS's boot menu was set up while this entry was missing, its Windows item starts Windows "
-               "directly. That works. With BitLocker, start Windows from the firmware boot menu instead.")
 
 
 class RestoreError(Exception):
@@ -155,10 +158,84 @@ def _run(cmd: list) -> str:
     return p.stdout
 
 
-def restore(snap, *, disk="", part=0, check=False, yes=False, remove_stale=False, run=_run, ask=None,
-            say=print) -> int:
-    """Returns the exit code. `run(cmd) -> stdout` and `ask(question) -> bool` are replaced in tests."""
+def split_windows(text: str) -> tuple:
+    """(limine.conf without its Windows items, the Windows items). The Windows items are the top-level entries whose
+    name starts with "Windows", the ones the installer writes; sub-entries (`//`) stay with their parent."""
+    keep, win, cur = [], [], None
+    for line in text.split("\n"):
+        if line.startswith("/") and not line.startswith("//"):
+            cur = win if line[1:].startswith("Windows") else keep
+        (keep if cur is None else cur).append(line)
+    return "\n".join(keep), "\n".join(win)
+
+
+def with_windows(text: str, items: list) -> str:
+    """limine.conf with its Windows items replaced by `items` (system.windows_menu_lines), at the end."""
+    crlf = "\r\n" in text
+    rest, _ = split_windows(text.replace("\r\n", "\n"))
+    new = rest.rstrip("\n") + "\n" + ("\n".join(items) + "\n" if items else "")
+    return new.replace("\n", "\r\n") if crlf else new
+
+
+def _guids(text: str) -> set:
+    return {g.lower() for g in re.findall(r"guid\(([0-9A-Fa-f-]+)\)", text)}
+
+
+def sync_menu(snap, nvram: list, *, boot: str, state_path: str, check: bool, say) -> int:
+    """Make the Windows items of TapkicH-OS's boot menu match the Windows boot partitions on the disks. Returns the
+    exit code."""
+    items = system.windows_menu_items(windows_partitions(snap))
+    want = system.windows_menu_lines(items, system.windows_boot_entry(snap, [g for _, g in items], nvram))
+    text = None
+    for c in sb.LIMINE_CONFS:
+        try:
+            with open(f"{boot}/{c}", newline="") as f:
+                text = f.read()
+            break
+        except OSError:
+            continue
+    if text is None:
+        say(f"Boot menu: no limine.conf found on {boot}, so the TapkicH-OS boot menu was not checked.")
+        return 1
+    _, have = split_windows(text.replace("\r\n", "\n"))
+    if have.strip("\n") == "\n".join(want).strip("\n"):
+        say("Boot menu: TapkicH-OS's boot menu lists Windows.")
+        return 0
+    if _guids(have) - _guids("\n".join(want)) and (why := skipped_refusal(snap)):
+        say("Boot menu: not changed. " + why)
+        return 1
+    if check:
+        say("Boot menu: TapkicH-OS's boot menu does not list Windows as it is now. Run `sudo tapkich restore windows` "
+            "to update it.")
+        return 1
+    _, error = bootloader.rewrite(lambda t: with_windows(t, want), boot, state_path)
+    if error:
+        say(f"Boot menu: not changed, {error}")
+        return 1
+    say("Boot menu: " + ("Windows is added to TapkicH-OS's boot menu." if not have.strip() else
+                         "the Windows items of TapkicH-OS's boot menu are updated.") + " It shows on the next start.")
+    return 0
+
+
+def restore(snap, *, disk="", part=0, check=False, yes=False, remove_stale=False, run=_run, ask=None, say=print,
+            boot="", state_path=sb.STATE_FILE) -> int:
+    """Returns the exit code. `run(cmd) -> stdout` and `ask(question) -> bool` are replaced in tests. With `boot`
+    (where the installed system's ESP is mounted) the boot menu's Windows items are brought up to date afterwards."""
     say = fit(say)
+    code = _restore_entry(snap, disk=disk, part=part, check=check, yes=yes, remove_stale=remove_stale, run=run,
+                          ask=ask, say=say)
+    if not boot or not windows_partitions(snap):
+        return code
+    try:
+        nvram, _ = _read_list(run)                     # the entry may have just been added: the menu can then use it
+    except RestoreError as e:
+        say(f"tapkich restore windows: {e}")
+        return 1
+    return max(code, sync_menu(snap, nvram, boot=boot, state_path=state_path, check=check, say=say))
+
+
+def _restore_entry(snap, *, disk, part, check, yes, remove_stale, run, ask, say) -> int:
+    """The firmware's boot entry. Returns the exit code."""
     try:
         parts = windows_partitions(snap)
         if not parts and not remove_stale:
@@ -213,7 +290,7 @@ def restore(snap, *, disk="", part=0, check=False, yes=False, remove_stale=False
                 if stale:
                     say("Or remove those whose partition is gone: sudo tapkich restore windows --remove-stale")
         if has_entry(nvram, target):
-            say(f'The "{LABEL}" boot entry is there (disk {target.disk}, partition {target.number}). Nothing to do.')
+            say(f'The "{LABEL}" boot entry is there (disk {target.disk}, partition {target.number}).')
             return 0
         say(f'The firmware has no "{LABEL}" boot entry for Windows on {describe(target)}.')
         if check:
@@ -233,7 +310,6 @@ def restore(snap, *, disk="", part=0, check=False, yes=False, remove_stale=False
         if not order_after or order_after[-1] != new:
             raise RestoreError(f"Boot{new} is not at the end of the boot order. Check `efibootmgr -v`.")
         say(f'Done: Boot{new} "{LABEL}" is added after the existing entries.')
-        say(NOTE_LIMINE)
         return 0
     except RestoreError as e:
         say(f"tapkich restore windows: {e}")
@@ -289,7 +365,7 @@ def main(argv=None) -> int:
               "list to restore.", file=sys.stderr)
         return 1
     snap = detect.detect_system()
-    return restore(snap, **opts, ask=_ask)
+    return restore(snap, **opts, ask=_ask, boot=sb.BOOT)
 
 
 if __name__ == "__main__":
