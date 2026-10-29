@@ -230,7 +230,9 @@ class Applier:
         dev = self.devices[target]
         steps = [o for o in self.plan.ops if o.kind in ("NEW_TABLE", "DELETE", "CREATE", "ENCRYPT", "FORMAT")]
         done = 0
-        labels = {"NEW_TABLE": "Creating a new partition table", "DELETE": "Removing the old TapkicH-OS partitions",
+        labels = {"NEW_TABLE": "Creating a new partition table",
+                  "DELETE": ("Removing the old TapkicH-OS partitions" if self.plan.mode == "reinstall" else
+                             "Removing the old partitions"),
                   "CREATE": "Creating partitions", "ENCRYPT": "Encrypting the system partition (takes a moment)",
                   "FORMAT": "Formatting"}
         new_table = any(o.kind == "NEW_TABLE" for o in self.plan.ops)

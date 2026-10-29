@@ -310,23 +310,29 @@ disk_form() {
 mode_form() {
   mode=$(answer mode)
   [[ -n $mode ]] && return 3
-  local info free prev table parts choices=() risky=""
+  local info free prev table parts others choices=() risky=""
   info=$(jq -c --arg d "$disk" '.[] | select(.id == $d)' <<<"$DISKS_JSON")
   free=$(jq -r '.free_gb' <<<"$info"); prev=$(jq -r '.has_previous_install' <<<"$info")
   table=$(jq -r '.table' <<<"$info"); parts=$(jq -r '.partitions' <<<"$info")
+  others=$(jq -r '.erasable_besides_windows // 0' <<<"$info")
   # Free-space installs need an existing GPT disk (a blank disk with no table can only be used whole).
   [[ $table == gpt ]] && choices+=("Use free space on this disk (${free} GB free, everything else stays)")
   [[ $prev == true ]] && choices+=("Reinstall over the previous TapkicH-OS")
+  # Windows (or only its boot files) on this disk next to something else, e.g. an old Linux: erase the rest
+  if [[ $table == gpt ]] && ((others > 0)); then
+    choices+=("Erase everything except Windows (its boot files and Windows itself stay)"); risky=$(( ${#choices[@]} - 1 ))
+  fi
   if ((parts == 0)); then
     choices+=("Use the whole disk (nothing is on it)")                 # nothing to lose: not a risky action
   else
-    choices+=("Erase this whole disk"); risky=$(( ${#choices[@]} - 1 ))
+    choices+=("Erase this whole disk"); risky="$risky $(( ${#choices[@]} - 1 ))"
   fi
   logo
   UI_RISKY=$risky ui_select one "How should it be installed on $disk?" "${choices[@]}" || return 2
   case ${UI_PICKED[0]} in
     "Use free space"*) mode=free_space ;;
     Reinstall*) mode=reinstall ;;
+    "Erase everything except"*) mode=keep_windows ;;
     *) mode=whole_disk ;;
   esac
 }
@@ -730,6 +736,7 @@ review() {
   row "Creates" "$made"
   local gone; gone=$(jq -r '.deleted | join(", ")' <<<"$result")
   if [[ $mode == whole_disk ]]; then row "Erases" "everything on $disk" "$S_RISK"
+  elif [[ $mode == keep_windows ]]; then row "Erases" "$(jq -r '.erases | join(", ")' <<<"$result")" "$S_RISK"
   elif [[ -n $gone ]]; then row "Replaces" "the previous TapkicH-OS ($gone)"
   else row "Keeps" "everything already on $disk"; fi
   local kept; kept=$(jq -r '.windows_boot_kept | join(", ")' <<<"$result")
@@ -752,7 +759,7 @@ review() {
   if [[ -n $w ]]; then blank; warn "Heads up:"; warn "$w"; fi
   blank
   if [[ -n $ANSWERS ]]; then return 3; fi
-  local risky=""; [[ $mode == whole_disk ]] && risky=0          # "Install" is drawn red when everything is erased (this menu only)
+  local risky=""; [[ $mode == whole_disk || $mode == keep_windows ]] && risky=0   # "Install" is drawn red when data is erased (this menu only)
   UI_RISKY=$risky ui_select one "Install now?" "Install" "Cancel" || return 2          # ESC: back
   [[ ${UI_PICKED_IDX[0]} == 0 ]] || abort
 }
@@ -844,8 +851,8 @@ install_system() {
         # A reinstall reformats the old TapkicH-OS partitions, so their contents may already be overwritten: only the layout comes back.
         body "The partition layout was restored."
         warn "The previous TapkicH-OS on this disk may no longer start (its partitions may already have been overwritten)."
-      elif [[ $mode == whole_disk ]]; then
-        # A whole-disk install writes over the old data before it can fail: the layout comes back, the contents may not.
+      elif [[ $mode == whole_disk || $mode == keep_windows ]]; then
+        # These installs write over the old data before they can fail: the layout comes back, the contents may not.
         body "The partition layout was restored."
         warn "Files that were on this disk may already have been overwritten and may be damaged or gone."
       else

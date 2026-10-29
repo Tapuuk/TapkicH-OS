@@ -31,6 +31,7 @@ RST_WARNING = ("Intel RST / RAID (or VMD) storage mode is on. Linux may not see 
 MODE_FREE_SPACE = "free_space"
 MODE_WHOLE_DISK = "whole_disk"
 MODE_REINSTALL = "reinstall"
+MODE_KEEP_WINDOWS = "keep_windows"        # erase the disk except Windows' partitions (its boot files, Windows itself)
 
 
 class PlanError(Exception):
@@ -275,6 +276,14 @@ def plan(snap: Snapshot, choices: Choices) -> Plan:
     if choices.mode == MODE_WHOLE_DISK:
         _check_whole_disk(snap, target, roles, ov)
         deleted = list(target.partitions)
+    elif choices.mode == MODE_KEEP_WINDOWS:
+        deleted = _check_keep_windows(snap, target, ov)
+        boot_esp = [p for p in target.partitions if holds_windows_boot(p)]
+        for p in boot_esp:
+            other = [d for d in p.efi_dirs if d.lower() not in ("microsoft", "boot")]
+            if other:
+                warnings.append(f"The Windows EFI partition {p.ref} also holds other boot loaders' files "
+                                f"(EFI/{', EFI/'.join(other)}). It is not touched, so they stay there.")
     elif choices.mode in (MODE_FREE_SPACE, MODE_REINSTALL):
         if target.table != "gpt":
             raise HardStop("NEED_GPT", f"{target.id} is not GPT ({target.table}); free-space installs require GPT. Use whole-disk on an empty disk instead.")
@@ -372,6 +381,46 @@ def plan(snap: Snapshot, choices: Choices) -> Plan:
     except AssertionError as e:
         raise HardStop("UNSAFE_PLAN", f"The installer refused its own plan to protect your computer: {e}")
     return result
+
+
+def keeps_windows(p: Partition) -> bool:
+    """Kept by the "erase everything except Windows" mode: Windows' boot files, Windows itself, its system partitions."""
+    return holds_windows_boot(p) or maybe_windows(p) or p.role in (ROLE_MSR, ROLE_WINRE)
+
+
+def _check_keep_windows(snap: Snapshot, target: Disk, ov: frozenset) -> list:
+    """The partitions the "erase everything except Windows" mode deletes, or a stop."""
+    if target.table != "gpt":
+        raise HardStop("NEED_GPT", f"{target.id} is not GPT ({target.table}); keeping Windows' partitions needs GPT.")
+    if not any(keeps_windows(p) for p in target.partitions):
+        raise HardStop("NO_WINDOWS_ON_TARGET", f"{target.id} has no Windows partitions or Windows boot files to keep.",
+                       alternatives=[f"Erase the whole disk {target.id}", f"Free-space install on {target.id}"])
+    deleted = [p for p in target.partitions if not keeps_windows(p)]
+    if not deleted:
+        raise HardStop("NOTHING_TO_ERASE", f"{target.id} holds only Windows' partitions, so there is nothing to erase.",
+                       alternatives=[f"Free-space install on {target.id}"])
+    foreign = [p for p in deleted if p in foreign_boot_esps(snap)]
+    if foreign and OVERRIDE_FOREIGN_BOOT not in ov:
+        raise HardStop(
+            "FOREIGN_BOOT_ON_TARGET",
+            f"{foreign[0].ref} has another bootloader's EFI files (e.g. GRUB from another Linux). Erasing it means "
+            "that system no longer starts.",
+            alternatives=[f"Free-space install on {target.id}", "Pick a different disk"],
+            override=OVERRIDE_FOREIGN_BOOT,
+        )
+    gone = {p.ref for p in deleted}
+    for e in snap.nvram:                       # UEFI says Windows boots from a partition we would erase: do not guess
+        if _is_windows_entry(e.label):
+            p = snap.find_partuuid(e.partuuid)
+            if p is not None and p.ref in gone and OVERRIDE_AMBIGUOUS not in ov:
+                raise NeedsConfirmation(
+                    "NVRAM_POINTS_AT_TARGET_UNVERIFIED",
+                    f"UEFI boot entry {e.bootnum} ({e.label}) points at {p.ref}, which would be erased, but Windows "
+                    "boot files were not found there. The layout is ambiguous; refusing to guess.",
+                    alternatives=["Choose a different disk", "Boot Windows and check it starts normally, then retry"],
+                    override=OVERRIDE_AMBIGUOUS,
+                )
+    return deleted
 
 
 def _check_whole_disk(snap: Snapshot, target: Disk, roles: set, ov: frozenset):

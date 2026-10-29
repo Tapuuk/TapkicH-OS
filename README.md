@@ -35,6 +35,8 @@ Gaming Mode works just like SteamOS on the Steam Deck. Steam's console interface
 
 If you keep Windows, shrink its drive in Disk Management first to make room, and turn off Fast Startup.
 
+To replace another Linux on a disk that also holds Windows or its boot files, choose **Erase everything except Windows**: the installer keeps Windows' partitions as they are and erases the rest of that disk.
+
 ## Commands
 
 Everything after the install goes through one command, `tapkich`.
@@ -54,7 +56,7 @@ Everything after the install goes through one command, `tapkich`.
 | `tapkich secureboot status` | Shows the Secure Boot state and what anti-cheat needs (TPM, kernel settings) |
 | `tapkich secureboot setup` | Turns Secure Boot on with your own keys plus Microsoft's |
 | `tapkich secureboot refresh` | Signs the boot files again after you change them by hand |
-| `tapkich restore windows` | Puts Windows back in the firmware's boot menu if it went missing |
+| `tapkich restore windows` | Puts Windows back in the firmware's boot menu if it went missing, and adds it to the TapkicH-OS boot menu (for example when Windows' boot files were repaired after the install) |
 | `tapkich restore windows --check` | Only checks, changes nothing |
 | `tapkich restore windows --yes` | Restores without asking |
 | `tapkich restore windows --remove-stale` | Also removes leftover "Windows Boot Manager" entries whose partition is gone (asks first) |

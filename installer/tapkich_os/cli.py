@@ -9,8 +9,8 @@ import sys
 from .detect import detect_system
 from .model import GIB, MIB, Snapshot
 from .planner import (
-    Choices, ESP_SIZE, MIN_ROOT, PlanError, MODE_FREE_SPACE, MODE_REINSTALL, MODE_WHOLE_DISK,
-    boot_map, disk_roles, plan,
+    Choices, ESP_SIZE, MIN_ROOT, PlanError, MODE_FREE_SPACE, MODE_KEEP_WINDOWS, MODE_REINSTALL, MODE_WHOLE_DISK,
+    boot_map, disk_roles, keeps_windows, plan,
 )
 
 
@@ -57,9 +57,23 @@ def disks_for_wizard(snap: Snapshot) -> list:
             "roles": sorted(disk_roles(snap, d.id)),
             "has_previous_install": any(p.is_ours for p in d.partitions),
             "partitions": len(d.partitions),
+            # what "Erase everything except Windows" would remove (0 when there is no Windows to keep or nothing else)
+            "erasable_besides_windows": (sum(not keeps_windows(p) for p in d.partitions)
+                                         if any(keeps_windows(p) for p in d.partitions) else 0),
             "label": f"{d.id}  {round(d.size / GIB)} GB  {d.model or 'disk'}  [{_what_is_on(snap, d)}]"
                      + (f"  (too small: needs {(ESP_SIZE + MIN_ROOT) // GIB} GB)" if d.size - 2 * MIB < ESP_SIZE + MIN_ROOT else ""),
         })
+    return out
+
+
+def _erases(snap: Snapshot, result) -> list:
+    """What the plan deletes, for the review screen: "nvme0n1p2 (btrfs, 100 GB)"."""
+    out = []
+    for p in snap.partitions():
+        if p.ref in result.deleted:
+            what = ", ".join(x for x in (p.name, p.fs or p.role, f"{max(1, round(p.size / GIB))} GB") if x)
+            node = f"{p.disk}{'p' if p.disk[-1:].isdigit() else ''}{p.number}"
+            out.append(f"{node} ({what})")
     return out
 
 
@@ -160,14 +174,14 @@ def main(argv=None) -> int:
     d.set_defaults(snapshot=None)
     pl = sub.add_parser("plan", help="show the plan for a disk (dry run)")
     pl.add_argument("--disk", required=True)
-    pl.add_argument("--mode", choices=[MODE_FREE_SPACE, MODE_WHOLE_DISK, MODE_REINSTALL], default=MODE_FREE_SPACE)
+    pl.add_argument("--mode", choices=[MODE_FREE_SPACE, MODE_WHOLE_DISK, MODE_REINSTALL, MODE_KEEP_WINDOWS], default=MODE_FREE_SPACE)
     pl.add_argument("--override", action="append", default=[])
     pl.add_argument("--snapshot")
     r = sub.add_parser("report", help="boot map plus, for every disk, what a whole-disk install would do")
     r.add_argument("--snapshot")
     ap_ = sub.add_parser("apply", help="WRITES to disks: partition + format the confirmed plan (backup, verify, rollback)")
     ap_.add_argument("--disk", required=True)
-    ap_.add_argument("--mode", choices=[MODE_FREE_SPACE, MODE_WHOLE_DISK, MODE_REINSTALL], default=MODE_FREE_SPACE)
+    ap_.add_argument("--mode", choices=[MODE_FREE_SPACE, MODE_WHOLE_DISK, MODE_REINSTALL, MODE_KEEP_WINDOWS], default=MODE_FREE_SPACE)
     ap_.add_argument("--override", action="append", default=[])
     ap_.add_argument("--devices", help='JSON {"id": "/dev/path"}; default = scan this machine')
     ap_.add_argument("--backup-dir", default="/var/log/tapkich-os-install/backup")
@@ -217,7 +231,8 @@ def main(argv=None) -> int:
                               "boot_map": result.boot_map, "root_fs": result.root_fs, "encrypt": result.encrypt,
                               "root_gb_min": result.root_gb_min,
                               "root_gb_max": result.root_gb_max, "created": result.created,
-                              "deleted": result.deleted, "windows_boot_kept": result.windows_boot_kept}))
+                              "deleted": result.deleted, "erases": _erases(snap, result),
+                              "windows_boot_kept": result.windows_boot_kept}))
         else:
             print(result.describe())
         return 0
