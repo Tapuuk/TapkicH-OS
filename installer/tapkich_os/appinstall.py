@@ -52,12 +52,16 @@ ALIASES = {"decky": "decky-loader", "brave": "brave-debloated", "chatgpt": "chat
 HELP_WIDTH = 78
 
 
-def help_lines() -> str:
-    """The 'Optional apps' lines of `tapkich help`, made from APPS, wrapped to HELP_WIDTH columns."""
+def help_lines(width: int = HELP_WIDTH) -> str:
+    """The 'Optional apps' lines of `tapkich help`, made from APPS, wrapped to `width` columns. In a narrow terminal
+    the description goes on the lines below the command."""
     out = []
     for a in APPS:
         head = f"  tapkich install {a.name:<17} "
-        lines = textwrap.wrap(a.desc, HELP_WIDTH - len(head)) or [""]
+        if width - len(head) < 30:
+            out.append(f"  tapkich install {a.name}")
+            head = " " * 6
+        lines = textwrap.wrap(a.desc, width - len(head), break_on_hyphens=False) or [""]
         out.append(head + lines[0])
         out += [" " * len(head) + line for line in lines[1:]]
     return "\n".join(out)

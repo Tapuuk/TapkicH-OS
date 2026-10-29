@@ -24,38 +24,47 @@ HELP_COMMANDS = [
     ("tapkich secureboot status", "Secure Boot, and what anti-cheat (Epic EAC for Linux) needs: TPM, kernel settings"),
     ("tapkich secureboot setup", "Turn Secure Boot on with our own keys, keeping Microsoft's (Windows keeps starting)"),
     ("tapkich secureboot refresh", "Sign the boot files again after you changed them by hand (updates do it for you)"),
-    ("tapkich restore windows [--check|--yes|--remove-stale]",
-     "Put the firmware's \"Windows Boot Manager\" boot entry back if it went missing; --remove-stale also removes "
-     "leftover ones whose partition is gone"),
-    ("tapkich restore windows --disk /dev/xxx --part N",
-     "Pick the Windows partition when there is more than one"),
-    ("tapkich bootloader timeout [<seconds>]",
-     "Show or set the boot menu countdown (0 to 60 seconds, or `no` to wait for you)"),
+    ("tapkich restore windows", "Put Windows back in the firmware's boot list and in TapkicH-OS's boot menu. "
+     "Options: --check (only look), --yes (no questions), --remove-stale (drop entries whose partition is gone), "
+     "--disk /dev/xxx --part N (with more than one Windows)"),
+    ("tapkich bootloader timeout", "Show the boot menu countdown; add 0 to 60 (seconds) to set it, or `no` to wait "
+                                   "for you"),
     ("tapkich help", "This help (also: tapkich --help, tapkich -h, or just tapkich)"),
 ]
 
 
-def _help_head() -> str:
+def _help_head(width: int = HELP_WIDTH) -> str:
     lines = ["tapkich: tweak your TapkicH-OS system", ""]
+    column = HELP_COLUMN if width - HELP_COLUMN >= 30 else 6   # a narrow terminal: descriptions under the commands
     for cmd, desc in HELP_COMMANDS:
-        wrapped = textwrap.wrap(desc, HELP_WIDTH - HELP_COLUMN)
+        wrapped = textwrap.wrap(desc, width - column, break_on_hyphens=False)
         head = f"  {cmd}"
-        if len(head) + 2 > HELP_COLUMN:               # a long command: the description starts on the next line
+        if len(head) + 2 > column:                    # a long command: the description starts on the next line
             lines.append(head)
             head = ""
-        lines.append(f"{head:<{HELP_COLUMN}}{wrapped[0]}")
-        lines += [" " * HELP_COLUMN + w for w in wrapped[1:]]
+        lines.append(f"{head:<{column}}{wrapped[0]}")
+        lines += [" " * column + w for w in wrapped[1:]]
     return "\n".join(lines) + "\n\nOptional apps:\n"
 
-
-HELP_HEAD = _help_head()
 
 HELP_TAIL = """
 The desktop is Caelestia shell: its settings, wallpapers and colours are in
 its own menus and the `caelestia` command.
 """
 
-HELP = HELP_HEAD + appinstall.help_lines() + "\n" + HELP_TAIL
+
+def help_text(width: int = HELP_WIDTH) -> str:
+    tail = "\n" + "\n".join(textwrap.fill(p, width, break_on_hyphens=False) for p in HELP_TAIL.strip().split("\n\n")) + "\n"
+    return _help_head(width) + appinstall.help_lines(width) + "\n" + tail
+
+
+HELP = help_text()
+
+
+def _width() -> int:
+    """The help's width: 78 columns, or less in a narrower terminal (wider lines would wrap and run into the next)."""
+    import shutil
+    return max(30, min(HELP_WIDTH, shutil.get_terminal_size((HELP_WIDTH + 2, 24)).columns - 1))
 
 
 def _notify(text: str) -> None:
@@ -89,7 +98,7 @@ def gamemode() -> int:
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in ("help", "-h", "--help"):
-        print(HELP)
+        print(help_text(_width()))
         return 0
     cmd = args[0]
     if (cmd in ("keys", "doctor", "gamemode") and len(args) > 1) or (cmd == "secureboot" and args[1:2] == ["status"]
@@ -121,7 +130,7 @@ def main(argv=None) -> int:
     if cmd == "restore":
         if args[1:2] != ["windows"]:
             print("usage: tapkich restore windows [--check] [--yes] [--remove-stale] [--disk /dev/xxx --part N]\n"
-                  "  windows   put the firmware's \"Windows Boot Manager\" boot entry back if it went missing")
+                  "  windows   put Windows back in the firmware's boot list and in TapkicH-OS's boot menu")
             return 2
         if os.geteuid() != 0:                         # reading the disks and writing the boot list need root
             here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -143,7 +152,7 @@ def main(argv=None) -> int:
         print(render(evaluate(read_state("/"))))
         return 0
     print(f"tapkich: unknown command {' '.join(args)!r}\n")
-    print(HELP)
+    print(help_text(_width()))
     return 2
 
 
