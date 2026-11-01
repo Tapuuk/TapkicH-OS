@@ -53,6 +53,8 @@ Everything after the install goes through one command, `tapkich`.
 | `tapkich keys` | Shows your keyboard shortcuts, read from your current settings |
 | `tapkich install` | Lists the optional apps below |
 | `tapkich install <app>` | Installs one of them |
+| `tapkich default` | Lists the apps you can make the default |
+| `tapkich default <app>` | Makes it your default browser, terminal or file manager: in Caelestia's settings, its keys (SUPER + B, Q, E) and for links and folders opened by other apps |
 | `tapkich secureboot status` | Shows the Secure Boot state and what anti-cheat needs (TPM, kernel settings) |
 | `tapkich secureboot setup` | Turns Secure Boot on with your own keys plus Microsoft's |
 | `tapkich secureboot refresh` | Signs the boot files again after you change them by hand |
@@ -71,6 +73,7 @@ Everything after the install goes through one command, `tapkich`.
 | Category | App | Command |
 |---|---|---|
 | Browsers | Firefox | `tapkich install firefox` |
+|  | Chromium, the open-source browser Chrome is built from | `tapkich install chromium` |
 |  | Google Chrome | `tapkich install chrome` |
 |  | Brave with AI, Rewards, Wallet, VPN, News and telemetry switched off | `tapkich install brave-debloated` |
 | AI | Claude Desktop | `tapkich install claude-desktop` |
@@ -81,6 +84,14 @@ Everything after the install goes through one command, `tapkich`.
 | Gaming | Decky Loader, plugins for Gaming Mode | `tapkich install decky-loader` |
 
 Short names work too: `decky`, `brave`, `chatgpt`, `claude`, `google-chrome`, `telegram-desktop`, `1pass`.
+
+**Apps for `tapkich default`**
+
+| Kind | Command |
+|---|---|
+| Browser | `tapkich default chromium`, `waterfox`, `firefox`, `chrome` or `brave` |
+| Terminal | `tapkich default foot`, `alacritty` or `kitty` |
+| File manager | `tapkich default nautilus` or `thunar` |
 
 Steam, Lutris, ProtonUp-Qt, Proton-GE, Discord, Prism Launcher, LocalSend and Waterfox are already installed.
 

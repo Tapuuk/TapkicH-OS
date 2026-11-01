@@ -1,6 +1,6 @@
 """`tapkich install <name>`: the optional apps. One registry (APPS) feeds the install code and the help text.
 
-Where each one comes from (checked 2026-10-24): Arch's extra repo with pacman (firefox, telegram), the AUR with paru
+Where each one comes from (checked 2026-10-24): Arch's extra repo with pacman (firefox, chromium, telegram), the AUR with paru
 (1password, chrome, claude-desktop, chatgpt-desktop, linear, brave), or, for Decky Loader, the upstream GitHub release,
 installed the way Decky's own installer does it (decky-installer cli/install_release.sh) but as plain code. Paru is
 run as the user WITH its review prompt (no --skipreview, no --noconfirm): the user is at the terminal.
@@ -35,6 +35,7 @@ APPS = [
     App("chatgpt-desktop", "ChatGPT Desktop, OpenAI's own Linux app (proprietary, AUR)", "aur",
         "chatgpt-desktop"),
     App("firefox", "Firefox (Arch repos)", "pacman", "firefox"),
+    App("chromium", "Chromium, the open-source browser Chrome is built from (Arch repos)", "pacman", "chromium"),
     App("chrome", "Google Chrome (proprietary, AUR)", "aur", "google-chrome"),
     App("decky-loader", "Decky Loader, plugins for Steam's Gaming Mode (from Decky's GitHub release)", "decky"),
     App("telegram", "Telegram Desktop (Arch repos)", "pacman", "telegram-desktop"),

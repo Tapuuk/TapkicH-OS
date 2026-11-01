@@ -9,7 +9,7 @@ import subprocess
 import sys
 import textwrap
 
-from . import appinstall, caelestia
+from . import appinstall, caelestia, defaults
 
 HELP_WIDTH = 78
 HELP_COLUMN = 32                                      # where the descriptions start
@@ -21,6 +21,8 @@ HELP_COMMANDS = [
                          "button in Caelestia's power menu). Steam's \"Switch to Desktop\" comes back."),
     ("tapkich keys", "Your keyboard shortcuts, read from your current config"),
     ("tapkich install [<app>]", "Install an optional app (the list is below); without a name it prints the list"),
+    ("tapkich default [<app>]", "Make an app your default browser, terminal or file manager (the list is below): "
+                                "in Caelestia's settings, its keys and for links from other apps"),
     ("tapkich secureboot status", "Secure Boot, and what anti-cheat (Epic EAC for Linux) needs: TPM, kernel settings"),
     ("tapkich secureboot setup", "Turn Secure Boot on with our own keys, keeping Microsoft's (Windows keeps starting)"),
     ("tapkich secureboot refresh", "Sign the boot files again after you changed them by hand (updates do it for you)"),
@@ -55,7 +57,8 @@ its own menus and the `caelestia` command.
 
 def help_text(width: int = HELP_WIDTH) -> str:
     tail = "\n" + "\n".join(textwrap.fill(p, width, break_on_hyphens=False) for p in HELP_TAIL.strip().split("\n\n")) + "\n"
-    return _help_head(width) + appinstall.help_lines(width) + "\n" + tail
+    return (_help_head(width) + appinstall.help_lines(width) + "\n\nDefault apps (tapkich default <name>):\n"
+            + defaults.help_lines(width) + "\n" + tail)
 
 
 HELP = help_text()
@@ -108,6 +111,8 @@ def main(argv=None) -> int:
         return 2
     if cmd == "install":
         return appinstall.install(args[1:])
+    if cmd == "default":
+        return defaults.default(args[1:])
     if cmd == "gamemode":
         return gamemode()
     if cmd == "keys":
