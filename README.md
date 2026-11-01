@@ -73,8 +73,9 @@ Everything after the install goes through one command, `tapkich`.
 | Category | App | Command |
 |---|---|---|
 | Browsers | Firefox | `tapkich install firefox` |
-|  | Chromium, the open-source browser Chrome is built from | `tapkich install chromium` |
+|  | Chromium, the open-source browser Chrome is built from (no Google sign-in or sync: Google blocks it outside Chrome) | `tapkich install chromium` |
 |  | Google Chrome | `tapkich install chrome` |
+|  | Google Chrome with your Google account and sync, but usage stats, crash reports, ad tracking and surveys switched off | `tapkich install chrome-debloated` |
 |  | Brave with AI, Rewards, Wallet, VPN, News and telemetry switched off | `tapkich install brave-debloated` |
 | AI | Claude Desktop | `tapkich install claude-desktop` |
 |  | ChatGPT Desktop | `tapkich install chatgpt-desktop` |

@@ -1,7 +1,7 @@
 """`tapkich install <name>`: the optional apps. One registry (APPS) feeds the install code and the help text.
 
 Where each one comes from (checked 2026-10-24): Arch's extra repo with pacman (firefox, chromium, telegram), the AUR with paru
-(1password, chrome, claude-desktop, chatgpt-desktop, linear, brave), or, for Decky Loader, the upstream GitHub release,
+(1password, chrome, chrome-debloated, claude-desktop, chatgpt-desktop, linear, brave), or, for Decky Loader, the upstream GitHub release,
 installed the way Decky's own installer does it (decky-installer cli/install_release.sh) but as plain code. Paru is
 run as the user WITH its review prompt (no --skipreview, no --noconfirm): the user is at the terminal.
 """
@@ -35,8 +35,11 @@ APPS = [
     App("chatgpt-desktop", "ChatGPT Desktop, OpenAI's own Linux app (proprietary, AUR)", "aur",
         "chatgpt-desktop"),
     App("firefox", "Firefox (Arch repos)", "pacman", "firefox"),
-    App("chromium", "Chromium, the open-source browser Chrome is built from (Arch repos)", "pacman", "chromium"),
+    App("chromium", "Chromium, the open-source browser Chrome is built from, without Google sign-in and sync "
+        "(Arch repos)", "pacman", "chromium"),
     App("chrome", "Google Chrome (proprietary, AUR)", "aur", "google-chrome"),
+    App("chrome-debloated", "Google Chrome with your Google account and sync, but usage stats, crash reports, ad "
+        "tracking and surveys switched off (proprietary, AUR)", "aur", "google-chrome"),
     App("decky-loader", "Decky Loader, plugins for Steam's Gaming Mode (from Decky's GitHub release)", "decky"),
     App("telegram", "Telegram Desktop (Arch repos)", "pacman", "telegram-desktop"),
     App("linear", "Linear (AUR, an unofficial Linux build of Linear's app)", "aur", "linear-bin",
@@ -90,6 +93,28 @@ BRAVE_POLICY = {
 
 def brave_policy_json() -> str:
     return json.dumps(BRAVE_POLICY, indent=2) + "\n"
+
+
+# ---- Chrome: our own managed policy. Google sign-in and sync stay on (the reason to pick Chrome over Chromium: Google
+# blocks sign-in for every other Chromium build since 2021). Every key is in Chromium's policy definitions
+# (components/policy/resources/templates/policy_definitions/, read 2026-11-01), supported on Linux and present in
+# google-chrome 156. Gemini's own switch (GeminiSettings) is not supported on Linux, so it is not set.
+CHROME_POLICY_FILE = "/etc/opt/chrome/policies/managed/tapkich-debloat.json"
+CHROME_POLICY = {
+    "MetricsReportingEnabled": False,                    # usage statistics and crash reports
+    "UrlKeyedAnonymizedDataCollectionEnabled": False,    # the addresses of the pages you visit
+    "FeedbackSurveysEnabled": False,
+    "PrivacySandboxAdTopicsEnabled": False,              # ad topics from your browsing
+    "PrivacySandboxSiteEnabledAdsEnabled": False,        # sites suggesting ads to other sites
+    "PrivacySandboxAdMeasurementEnabled": False,
+    "PrivacySandboxPromptEnabled": False,                # the "ad privacy" prompt, now that it has nothing to ask
+    "WebRtcEventLogCollectionAllowed": False,            # call logs uploaded to Google
+    "GenAiDefaultSettings": 1,                           # AI features stay, without your data improving Google's models
+}
+
+
+def chrome_policy_json() -> str:
+    return json.dumps(CHROME_POLICY, indent=2) + "\n"
 
 
 # ---- Decky Loader ---------------------------------------------------------------------------------------------------
@@ -219,15 +244,25 @@ def _install_package(app: App, run, out, which=shutil.which) -> int:
     return run(cmd).returncode
 
 
-def install_brave_policy(run, out) -> int:
+def install_policy(path: str, text: str, done: str, run, out) -> int:
     with tempfile.TemporaryDirectory() as d:
-        tmp = os.path.join(d, "tapkich-debloat.json")
+        tmp = os.path.join(d, os.path.basename(path))
         with open(tmp, "w") as f:
-            f.write(brave_policy_json())
-        rc = run(["sudo", "install", "-Dm644", tmp, BRAVE_POLICY_FILE]).returncode
-    out(f"Brave's AI chat, Rewards, Wallet, VPN, News, Talk and telemetry are switched off ({BRAVE_POLICY_FILE})."
-        if rc == 0 else f"Could not write {BRAVE_POLICY_FILE}.")
+            f.write(text)
+        rc = run(["sudo", "install", "-Dm644", tmp, path]).returncode
+    out(f"{done} ({path})." if rc == 0 else f"Could not write {path}.")
     return rc
+
+
+def install_brave_policy(run, out) -> int:
+    return install_policy(BRAVE_POLICY_FILE, brave_policy_json(),
+                          "Brave's AI chat, Rewards, Wallet, VPN, News, Talk and telemetry are switched off", run, out)
+
+
+def install_chrome_policy(run, out) -> int:
+    return install_policy(CHROME_POLICY_FILE, chrome_policy_json(),
+                          "Chrome's usage stats, crash reports, ad tracking and surveys are switched off; Google sign-in "
+                          "and sync stay on. Restart Chrome to apply it, then check chrome://policy", run, out)
 
 
 def usage_text() -> str:
@@ -263,6 +298,8 @@ def install(args: list, home: str | None = None, run=subprocess.run, urlopen=url
             return rc
         if app.name == "brave-debloated":             # also when Brave was there already: the policy is ours to keep
             rc = install_brave_policy(run, out)
+        elif app.name == "chrome-debloated":
+            rc = install_chrome_policy(run, out)
         return rc
     except OSError as e:
         out(f"{app.name} could not be installed: {e}")

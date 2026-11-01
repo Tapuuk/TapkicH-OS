@@ -43,7 +43,7 @@ DEFAULTS = [
     Default("thunar", "Thunar", "files", "thunar", "thunar.desktop"),
 ]
 BY_NAME = {d.name: d for d in DEFAULTS}
-ALIASES = {"google-chrome": "chrome", "brave-debloated": "brave", "files": "nautilus"}
+ALIASES = {"google-chrome": "chrome", "chrome-debloated": "chrome", "brave-debloated": "brave", "files": "nautilus"}
 
 KIND_WORDS = {"browser": "browser", "terminal": "terminal", "files": "file manager"}
 SHELL_KEYS = {"terminal": "terminal", "files": "explorer"}                  # shell.json general.apps.<key>
