@@ -150,9 +150,8 @@ def evaluate(f: dict) -> list:
                 v.append(Verdict("NVIDIA", OK, "NVIDIA open driver loaded"))
                 if f.get("nvidia_modeset") != "Y":
                     v.append(Verdict("NVIDIA", PROBLEM, "kernel modesetting is off (Hyprland and Gaming Mode need it)",
-                                     f"Add `{nvidia.CMDLINE}` to the kernel command line in /boot/EFI/limine/limine.conf" +
-                                     (", then run `sudo tapkich secureboot refresh` (Secure Boot checks the config)."
-                                      if f.get("sb_ours") else ".")))
+                                     f"Add `{nvidia.CMDLINE}` to the kernel command line in /etc/tapkich-os/limine.conf, "
+                                     "then run `sudo tapkich-boot-update`."))
                 else:
                     v.append(Verdict("NVIDIA", OK, "kernel modesetting on" +
                                      (", framebuffer console on" if f.get("nvidia_fbdev") == "Y" else "")))

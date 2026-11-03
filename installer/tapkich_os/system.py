@@ -56,7 +56,7 @@ def aur_fraction(line: str) -> float:
         if marker in low:
             return frac
     return 0.0
-from . import apps, caelestia, desktop, gaming, nvidia, package, shell, tuning
+from . import apps, bootupdate, caelestia, desktop, gaming, nvidia, package, shell, tuning
 
 MNT = "/mnt"
 KERNEL = "linux-zen"                       # Arch's official kernel package: vmlinuz-linux-zen, initramfs-linux-zen*.img
@@ -65,8 +65,7 @@ WALLPAPER_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"
 FLATHUB_REPO_FILE = "/usr/share/flatpak/remotes.d/flathub.flatpakrepo"   # in the flatpak package
 LOCAL_REPO = "/opt/tapkich-repo"           # on the ISO: paru built from the AUR (see iso/build-aur.sh)
 ZONEINFO = "/usr/share/zoneinfo"
-OS_RELEASE, OS_RELEASE_HOOK, LIMINE_HOOK, TAPKICH_WRAPPER = (package.OS_RELEASE, package.OS_RELEASE_HOOK,
-                                                  package.LIMINE_HOOK, package.TAPKICH_WRAPPER)
+OS_RELEASE, OS_RELEASE_HOOK, TAPKICH_WRAPPER = package.OS_RELEASE, package.OS_RELEASE_HOOK, package.TAPKICH_WRAPPER
 PACKAGES = [
     "base", "e2fsprogs", KERNEL, "linux-firmware", "amd-ucode", "intel-ucode",
     "limine", "efibootmgr", "networkmanager", "sudo", "nano", "git", "github-cli", "python",
@@ -1225,10 +1224,17 @@ class SystemInstaller:
         extra = " ".join(x for x in (self.gpu["cmdline"], serial) if x)
         conf = render_limine_conf(root_uuid, windows, t, serial=self.a.selftest, root_fs=self.root_fs, luks_uuid=luks_uuid,
                                   luks_style=self.luks_style, extra_cmdline=extra, windows_boot_entry=boot_entry)
-        for d in ("EFI/limine", "EFI/BOOT"):                                  # both: Limine reads the config beside itself
-            os.makedirs(f"{boot}/{d}", exist_ok=True)
-            with open(f"{boot}/{d}/limine.conf", "w") as f:
-                f.write(conf)
+        # The menu's one source is /etc/tapkich-os/limine.conf; both configs on the ESP (Limine reads the one beside
+        # itself) are generated from it, as tapkich-boot-update does on the installed system. No hashes and nothing
+        # enrolled yet: Secure Boot is off while installing (bootupdate.resolve), and the first start updates them.
+        os.makedirs(f"{self.mnt}/etc/tapkich-os", exist_ok=True)
+        with open(f"{self.mnt}/{bootupdate.SOURCE}", "w") as f:
+            f.write(conf)
+        menu = bootupdate.generate(conf, verify=False, editor=True, hash_of=None)
+        for c in bootupdate.LIMINE_CONFS:
+            os.makedirs(os.path.dirname(f"{boot}/{c}"), exist_ok=True)
+            with open(f"{boot}/{c}", "w") as f:
+                f.write(menu)
         for name in ("wallpaper.jpg", "font.bin"):                           # made by tools/make-boot-assets.py
             shutil_copy(os.path.join(LIMINE_DATA, name), f"{boot}/EFI/limine/{name}")
         shutil_copy("/usr/share/limine/BOOTX64.EFI", f"{boot}/EFI/limine/limine_x64.efi")

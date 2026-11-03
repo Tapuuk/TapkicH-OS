@@ -14,13 +14,19 @@ import os
 import shutil
 import sys
 
-from . import desktop, secureboot_setup, tuning, update
+from . import bootupdate, desktop, tuning, update
 
 NAME = "tapkich-os"
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEYRING_DIR = "/usr/share/pacman/keyrings"
 KEY_SOURCE = os.path.join(HERE, "data", "keyring")       # tapkich.gpg (public key) + tapkich-trusted (tools/make-signing-key.sh)
 HOOKS = "/usr/share/libalpm/hooks"
+DOCS = os.path.join(HERE, "data", "docs")               # the boot docs, also shipped on the system
+
+
+def _doc(name: str) -> str:
+    with open(os.path.join(DOCS, name)) as f:
+        return f.read()
 
 TAPKICH_WRAPPER = """#!/bin/sh
 # tapkich: the one command for tweaking this system (see `tapkich help`)
@@ -48,19 +54,7 @@ When = PostTransaction
 Exec = /bin/sh -c 'rm -f /etc/os-release && cp /usr/share/tapkich-os/os-release /etc/os-release'
 """
 
-# Does nothing under Secure Boot (the Secure Boot refresh hook installs, enrolls and signs Limine itself; a stock copy
-# here would replace the signed one first) and unless /boot really is the mounted EFI partition.
-LIMINE_HOOK = """[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = limine
-
-[Action]
-Description = Updating Limine on the TapkicH-OS EFI partition (only /boot, never another disk's ESP)...
-When = PostTransaction
-Exec = /bin/sh -c 'if [ ! -e /etc/tapkich-os/secureboot.conf ] && mountpoint -q /boot && [ -d /boot/EFI/limine ]; then install -D /usr/share/limine/BOOTX64.EFI /boot/EFI/limine/limine_x64.efi && install -D /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI; fi'
-"""
+UNITS = "/usr/lib/systemd/system"
 
 
 def system_files() -> dict:
@@ -69,13 +63,30 @@ def system_files() -> dict:
         "/usr/bin/tapkich": (TAPKICH_WRAPPER, 0o755),
         "/usr/share/tapkich-os/os-release": (OS_RELEASE, 0o644),
         f"{HOOKS}/tapkich-os-release.hook": (OS_RELEASE_HOOK, 0o644),
-        f"{HOOKS}/90-limine-deploy.hook": (LIMINE_HOOK, 0o644),
-        f"{HOOKS}/{secureboot_setup.HOOK_NAME}": (secureboot_setup.PACMAN_HOOK, 0o644),
+        # the boot menu: hashes, enrolled config hash and signatures kept in step (bootupdate.py)
+        "/usr/bin/tapkich-boot-update": (bootupdate.COMMAND, 0o755),
+        "/usr/bin/tapkich-secureboot-check": (bootupdate.SB_CHECK_COMMAND, 0o755),
+        f"{HOOKS}/{bootupdate.HOOK_NAME}": (bootupdate.PACMAN_HOOK, 0o644),
+        bootupdate.MKINITCPIO_POST_PATH: (bootupdate.MKINITCPIO_POST, 0o755),
+        bootupdate.KERNEL_INSTALL_PATH: (bootupdate.KERNEL_INSTALL, 0o755),
+        f"{UNITS}/tapkich-boot-update-shutdown.service": (bootupdate.SHUTDOWN_UNIT, 0o644),
+        f"{UNITS}/tapkich-boot-good.service": (bootupdate.GOOD_UNIT, 0o644),
+        f"{UNITS}/tapkich-boot-good.timer": (bootupdate.GOOD_TIMER, 0o644),
+        "/" + bootupdate.SETTINGS: (bootupdate.BOOT_CONF, 0o644),
+        "/usr/share/doc/tapkich-os/boot-locks.md": (_doc("boot-locks.md"), 0o644),
+        "/usr/share/doc/tapkich-os/boot-recovery.md": (_doc("boot-recovery.md"), 0o644),
         update.CONF: (update.render_conf(), 0o644),
         **{p: (c, 0o644) for p, c in tuning.files().items()},
         **desktop.system_files(),
     }
     return files
+
+
+# Always on (as if `systemctl enable`d): the shutdown check and the "last known good" copy of the boot files
+SYMLINKS = {
+    f"{UNITS}/multi-user.target.wants/tapkich-boot-update-shutdown.service": "../tapkich-boot-update-shutdown.service",
+    f"{UNITS}/timers.target.wants/tapkich-boot-good.timer": "../tapkich-boot-good.timer",
+}
 
 
 # /etc files the user may edit: pacman keeps their version on upgrades (PKGBUILD backup=())
@@ -107,6 +118,13 @@ def write_tree(dest: str) -> list:
         with open(full, "w") as f:
             f.write(content)
         os.chmod(full, mode)
+        written.append(path)
+    for path, target in SYMLINKS.items():
+        full = os.path.join(dest, path.lstrip("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        if os.path.lexists(full):
+            os.remove(full)
+        os.symlink(target, full)
         written.append(path)
     if os.path.isdir(os.path.join(dest, "etc/sudoers.d")):
         os.chmod(os.path.join(dest, "etc/sudoers.d"), 0o750)

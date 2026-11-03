@@ -17,6 +17,35 @@ if [[ ${TAPKICH_RELEASE:-0} == 1 ]]; then
   [[ $(git -C "$REPO" rev-parse HEAD) == $(git -C "$REPO" rev-parse origin/main) ]] || { echo "release build refused: HEAD is not origin/main (push the commit first)"; exit 1; }
 fi
 
+# Guard: the build works only inside $WORK. It must never touch this computer's own boot files: on a TapkicH-OS build
+# host a rebuilt /boot/initramfs-* without new hashes in limine.conf stops the next start (seen 2026-11-03). So the
+# host's boot tools are replaced, for this build, by stubs that stop it (inside a chroot the real ones run: the stub
+# directory does not exist there), and /boot is compared before and after.
+case $(realpath -m "$WORK") in
+  /|/boot|/boot/*|/efi|/efi/*|/usr|/usr/*|/etc|/etc/*) echo "build refused: work directory $WORK is a system path"; exit 1 ;;
+esac
+GUARD=$WORK/guard-bin
+rm -rf "$GUARD"; mkdir -p "$GUARD"
+for t in mkinitcpio bootctl kernel-install limine sbctl efibootmgr grub-install dracut tapkich-boot-update; do
+  printf '%s\n' '#!/bin/sh' \
+    "echo \"iso/build.sh: refused to run '$t \$*' on the build host: the ISO build never touches this computer's boot files\" >&2" \
+    'exit 97' > "$GUARD/$t"
+  chmod 755 "$GUARD/$t"
+done
+export PATH="$GUARD:$PATH"
+boot_state() { if mountpoint -q /boot; then find /boot -xdev -printf '%P %s %T@\n' | sort | sha256sum; else echo none; fi; }
+BOOT_BEFORE=$(boot_state)
+boot_guard() {
+  local rc=$?
+  if [[ $(boot_state) != "$BOOT_BEFORE" ]]; then
+    echo "!!! /boot on this computer CHANGED during the ISO build (it must not). Check before restarting:"
+    echo "!!!   sudo tapkich-boot-update --check     (and without --check to put the hashes back in step)"
+    rc=1
+  fi
+  exit $rc
+}
+trap boot_guard EXIT
+
 rm -rf "$WORK/profile" "$WORK/work"
 mkdir -p "$WORK" "$REPO/out"
 cp -a /usr/share/archiso/configs/releng "$WORK/profile"
@@ -25,6 +54,16 @@ bash "$REPO/iso/build-aur.sh"                  # paru from the AUR into a local 
 bash "$REPO/iso/customize.sh" "$WORK/profile" "$REPO"
 
 mkarchiso -v -w "$WORK/work" -o "$WORK/out" "$WORK/profile"
+# The ISO starts only its own boot loader (archiso's systemd-boot) with its own entries. No Limine and no limine.conf
+# on it: a Limine started from a USB stick (Ventoy) that cannot tell which volume it came from scans every disk for a
+# limine.conf, so it could pick up the installed system's config on the NVMe.
+efi_copy=$WORK/check-bootx64.efi
+mcopy -o -i "$WORK/work/efiboot.img" ::/EFI/BOOT/BOOTX64.EFI "$efi_copy"
+if grep -aq '++CONFIG_B2SUM_SIGNATURE++' "$efi_copy" || ! grep -aq 'systemd-boot' "$efi_copy" \
+   || mdir -/ -b -i "$WORK/work/efiboot.img" :: | grep -qi 'limine' || find "$WORK/work/iso" -iname 'limine*' | grep -q .; then
+  echo "build refused: the ISO's EFI boot loader is not archiso's systemd-boot, or it carries Limine files"; exit 1
+fi
+rm -f "$efi_copy"
 iso=$(ls -t "$WORK"/out/*.iso | head -1)
 name=$(basename "$iso" .iso)
 [[ ${SELFTEST:-0} == 1 ]] && name="${name}-selftest"

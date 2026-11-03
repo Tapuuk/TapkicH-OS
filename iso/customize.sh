@@ -65,6 +65,8 @@ printf '%s\n\n' 'TapkicH-OS \r (\l)' > "$P/airootfs/etc/issue"      # login prom
 # 4c. The boot menu never shows: the ISO boots straight into our installer (hold a key at power-on to get the
 #     systemd-boot menu back). No speech / memtest entries. BIOS (syslinux): 0.1 s timeout instead of 15 s.
 sed -i -e 's/^timeout .*/timeout 0/' -e 's/^beep .*/beep off/' "$P/efiboot/loader/loader.conf"
+# only the ISO's own entries: no automatic "Windows" / "EFI default loader" / firmware entries for other disks
+printf '%s\n' 'auto-entries no' 'auto-firmware no' >> "$P/efiboot/loader/loader.conf"
 rm -f "$P"/efiboot/loader/entries/02-* "$P"/efiboot/loader/entries/03-*
 sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$P/syslinux/archiso_sys.cfg"
 # systemd prints "Welcome to <PRETTY_NAME>!" while booting: make that our name, not "Arch Linux"

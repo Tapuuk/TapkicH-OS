@@ -1,8 +1,7 @@
 """`tapkich bootloader timeout [<seconds>]`: how long Limine's boot menu counts down before it starts the default entry.
 
-The installer writes the same limine.conf twice (EFI/limine/ and EFI/BOOT/; Limine reads the config beside itself).
-Only the `timeout:` line changes here. With Secure Boot set up (`tapkich secureboot setup`) the config's hash is
-enrolled into Limine, so the pacman hook's refresh runs afterwards; otherwise the system boots as it is.
+Only the `timeout:` line of the boot menu's source (/etc/tapkich-os/limine.conf) changes here; tapkich-boot-update
+(bootupdate.py) then writes both configs on the ESP from it, with their hashes, enrollment and signatures.
 """
 from __future__ import annotations
 
@@ -10,6 +9,7 @@ import os
 import re
 import sys
 
+from . import bootupdate
 from . import secureboot_setup as sb
 
 USAGE = ("usage: tapkich bootloader timeout [<seconds>]\n"
@@ -31,20 +31,20 @@ def parse(value: str) -> str | None:
     return None
 
 
+def _machine(boot: str):
+    root = os.path.dirname(boot.rstrip("/")) or "/"
+    return bootupdate.Machine(root, sign=None if root == "/" else False, log=lambda *_: None)
+
+
 def current(boot: str = sb.BOOT) -> str | None:
-    """The timeout in the first limine.conf found; Limine's default when that file has no timeout line; None when
-    there is no limine.conf at all."""
-    found = False
-    for c in sb.LIMINE_CONFS:
-        try:
-            with open(f"{boot}/{c}") as f:
-                m = _LINE.search(f.read())
-        except OSError:
-            continue
-        found = True
-        if m:
-            return m.group(1)
-    return LIMINE_DEFAULT if found else None
+    """The timeout in the boot menu's source; Limine's default when it has no timeout line; None when there is no
+    boot menu at all."""
+    try:
+        text = bootupdate.read_source(_machine(boot), create=False)
+    except (bootupdate.NotSetUp, OSError):
+        return None
+    m = _LINE.search(text)
+    return m.group(1) if m else LIMINE_DEFAULT
 
 
 def set_timeout_text(text: str, value: str) -> str:
@@ -55,52 +55,26 @@ def set_timeout_text(text: str, value: str) -> str:
     return new
 
 
-def set_timeout(value: str, boot: str = sb.BOOT) -> list:
-    """Rewrite the timeout line in every limine.conf that exists; returns the files written."""
-    done = []
-    for c in sb.LIMINE_CONFS:
-        path = f"{boot}/{c}"
-        try:
-            with open(path, newline="") as f:
-                text = f.read()
-        except OSError:
-            continue
-        with open(path, "w", newline="") as f:
-            f.write(set_timeout_text(text, value))
-        done.append(path)
-    return done
-
-
 def rewrite(change, boot: str = sb.BOOT, state_path: str = sb.STATE_FILE) -> tuple:
-    """Write `change(text)` into every limine.conf that exists. With Secure Boot set up the config's hash is enrolled
-    into Limine, so the boot files are re-signed; if that fails the old configs are put back. Returns (files written,
-    error text or "")."""
-    before = {}
-    for c in sb.LIMINE_CONFS:
+    """Write `change(text)` into the boot menu's source and regenerate both configs on the ESP (hashes, enrolled
+    config hash, signatures: tapkich-boot-update). If that fails the old source is put back and the ESP is unchanged.
+    Returns (the ESP configs, error text or ""); no configs when there is no boot menu."""
+    m = _machine(boot)
+    try:
+        before = bootupdate.read_source(m)
+    except bootupdate.NotSetUp:
+        return [], ""
+    bootupdate.write_source(m, change(before))
+    try:
+        bootupdate.update(m)
+    except (RuntimeError, OSError) as e:
         try:
-            with open(f"{boot}/{c}", newline="") as f:
-                before[f"{boot}/{c}"] = f.read()
+            bootupdate.write_source(m, before)
+            kept = "The old boot files were kept."
         except OSError:
-            pass
-    for path, text in before.items():
-        with open(path, "w", newline="") as f:
-            f.write(change(text))
-    if before and os.path.isfile(state_path):          # Secure Boot set up: the new config must be hashed and enrolled
-        try:
-            sb.refresh(boot, state_path)
-        except (RuntimeError, OSError) as e:
-            restored = True
-            for path, text in before.items():          # the enrolled hash belongs to the old config: put it back
-                try:
-                    with open(path, "w", newline="") as f:
-                        f.write(text)
-                except OSError:
-                    restored = False
-            return list(before), (f"the boot files could not be re-signed: {e}\n"
-                                  + ("The old boot files were kept." if restored else
-                                     "Do not restart with Secure Boot on before this is fixed (run `sudo tapkich "
-                                     "secureboot refresh`)."))
-    return list(before), ""
+            kept = "Run `sudo tapkich-boot-update` before restarting."
+        return [], f"the boot menu could not be updated: {e}\n{kept}"
+    return [m.esp(c) for c in bootupdate.LIMINE_CONFS], ""
 
 
 def main(args: list, boot: str = sb.BOOT, state_path: str = sb.STATE_FILE) -> int:

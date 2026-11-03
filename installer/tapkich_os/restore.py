@@ -20,7 +20,7 @@ import subprocess
 import sys
 import textwrap
 
-from . import bootloader, detect, planner, system
+from . import bootloader, bootupdate, detect, planner, system
 from . import secureboot_setup as sb
 
 LABEL = "Windows Boot Manager"        # Limine's Windows menu item finds the entry by exactly this name
@@ -186,14 +186,10 @@ def sync_menu(snap, nvram: list, *, boot: str, state_path: str, check: bool, say
     exit code."""
     items = system.windows_menu_items(windows_partitions(snap))
     want = system.windows_menu_lines(items, system.windows_boot_entry(snap, [g for _, g in items], nvram))
-    text = None
-    for c in sb.LIMINE_CONFS:
-        try:
-            with open(f"{boot}/{c}", newline="") as f:
-                text = f.read()
-            break
-        except OSError:
-            continue
+    try:                                               # the menu's source, /etc/tapkich-os/limine.conf (bootupdate.py)
+        text = bootupdate.read_source(bootloader._machine(boot), create=False)
+    except (bootupdate.NotSetUp, OSError):
+        text = None
     if text is None:
         say(f"Boot menu: no limine.conf found on {boot}, so the TapkicH-OS boot menu was not checked.")
         return 1

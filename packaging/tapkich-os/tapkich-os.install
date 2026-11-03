@@ -1,7 +1,16 @@
+boot_update() {
+  # the boot menu: regenerate the path hashes, enroll the config hash and re-sign, then check (this also repairs a
+  # menu that older versions left out of step). Nothing to do before the installer has put Limine there.
+  [ -d /boot/EFI/limine ] || return 0
+  /usr/bin/tapkich-boot-update --force --mark-good ||
+    echo "tapkich-os: the boot menu could not be updated (see above). Run 'sudo tapkich-boot-update' before restarting."
+}
+
 post_install() {
   # our package-signing key, so pacman trusts the [tapkich] update repository
   pacman-key --populate tapkich >/dev/null 2>&1 || echo "tapkich-os: could not add the TapkicH-OS signing key (run: pacman-key --populate tapkich)"
   systemctl daemon-reload >/dev/null 2>&1 || true
+  boot_update
 }
 
 post_upgrade() {
@@ -14,8 +23,8 @@ post_remove() {
     ln -sf ../usr/lib/os-release /etc/os-release
   fi
   if [ -e /etc/tapkich-os/secureboot.conf ]; then
-    echo "tapkich-os: Secure Boot stays set up. sbctl's own hook keeps signing the kernel, but a changed limine.conf"
-    echo "  or Limine itself is no longer enrolled and signed: turn Secure Boot off in the firmware before changing them."
+    echo "tapkich-os: Secure Boot stays set up. sbctl's own hook keeps signing the kernel, but nothing updates the"
+    echo "  hashes in limine.conf any more: turn Secure Boot off in the firmware before the next kernel update."
   fi
   systemctl daemon-reload >/dev/null 2>&1 || true
 }

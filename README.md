@@ -57,7 +57,12 @@ Everything after the install goes through one command, `tapkich`.
 | `tapkich default <app>` | Makes it your default browser, terminal or file manager: in Caelestia's settings, its keys (SUPER + B, Q, E) and for links and folders opened by other apps |
 | `tapkich secureboot status` | Shows the Secure Boot state and what anti-cheat needs (TPM, kernel settings) |
 | `tapkich secureboot setup` | Turns Secure Boot on with your own keys plus Microsoft's |
-| `tapkich secureboot refresh` | Signs the boot files again after you change them by hand |
+| `tapkich secureboot refresh` | The same as `tapkich-boot-update` |
+| `tapkich secureboot check` | The same as `tapkich-secureboot-check` |
+| `tapkich-boot-update` | Puts the boot menu back in step: the file hashes in both `limine.conf`, the config hash enrolled into Limine, and the Secure Boot signatures. Runs by itself after updates, `mkinitcpio` and at shutdown |
+| `tapkich-boot-update --check` | Only reports what is out of step, changes nothing (exit 1 if something is) |
+| `tapkich-boot-update --force` | Redoes everything even if it looks current |
+| `tapkich-secureboot-check` | Before you turn Secure Boot on: checks every boot file is signed and in step, and that `sbctl verify` is clean |
 | `tapkich restore windows` | Puts Windows back in the firmware's boot menu if it went missing, and adds it to the TapkicH-OS boot menu (for example when Windows' boot files were repaired after the install) |
 | `tapkich restore windows --check` | Only checks, changes nothing |
 | `tapkich restore windows --yes` | Restores without asking |
@@ -67,6 +72,8 @@ Everything after the install goes through one command, `tapkich`.
 | `tapkich bootloader timeout <seconds>` | Sets it, from 0 to 60 seconds (0 hides the menu) |
 | `tapkich bootloader timeout no` | Makes the boot menu wait until you pick an entry |
 | `tapkich help` | Lists everything (also `tapkich -h`, `tapkich --help` or just `tapkich`) |
+
+The boot menu is `/etc/tapkich-os/limine.conf` (edit it, then run `sudo tapkich-boot-update`), its settings are in `/etc/tapkich-os/boot.conf` (file hashes and the **E** editor, on or off with Secure Boot by default). How the boot locks work: [boot-locks.md](installer/tapkich_os/data/docs/boot-locks.md). If it does not start: [boot-recovery.md](installer/tapkich_os/data/docs/boot-recovery.md).
 
 **Apps for `tapkich install`**
 

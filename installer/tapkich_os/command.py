@@ -25,7 +25,12 @@ HELP_COMMANDS = [
                                 "in Caelestia's settings, its keys and for links from other apps"),
     ("tapkich secureboot status", "Secure Boot, and what anti-cheat (Epic EAC for Linux) needs: TPM, kernel settings"),
     ("tapkich secureboot setup", "Turn Secure Boot on with our own keys, keeping Microsoft's (Windows keeps starting)"),
-    ("tapkich secureboot refresh", "Sign the boot files again after you changed them by hand (updates do it for you)"),
+    ("tapkich secureboot refresh", "The same as tapkich-boot-update (kept for older scripts)"),
+    ("tapkich secureboot check", "The same as tapkich-secureboot-check"),
+    ("tapkich-boot-update", "Recompute the boot menu's file hashes, enroll its config into Limine and sign the boot "
+                            "files (updates do it for you). --check only reports, --force redoes everything. The "
+                            "menu itself is /etc/tapkich-os/limine.conf, the settings /etc/tapkich-os/boot.conf"),
+    ("tapkich-secureboot-check", "Before turning Secure Boot on: is every boot file signed and in step? (read-only)"),
     ("tapkich restore windows", "Put Windows back in the firmware's boot list and in TapkicH-OS's boot menu. "
      "Options: --check (only look), --yes (no questions), --remove-stale (drop entries whose partition is gone), "
      "--disk /dev/xxx --part N (with more than one Windows)"),
@@ -132,6 +137,16 @@ def main(argv=None) -> int:
                                "secureboot", *sub])
         from . import secureboot_setup
         return secureboot_setup.main(sub)
+    if cmd == "secureboot" and args[1:2] == ["check"]:
+        if len(args) > 2:
+            print("tapkich secureboot check: takes no options (see `tapkich help`)", file=sys.stderr)
+            return 2
+        if os.geteuid() != 0:                         # the boot partition and the keys are root-only
+            here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            os.execvp("sudo", ["sudo", "env", f"PYTHONPATH={here}", "PYTHONDONTWRITEBYTECODE=1", sys.executable, "-P", "-m", "tapkich_os.command",
+                               *args])
+        from . import bootupdate
+        return bootupdate.main(["--secure-boot-check"])
     if cmd == "restore":
         if args[1:2] != ["windows"]:
             print("usage: tapkich restore windows [--check] [--yes] [--remove-stale] [--disk /dev/xxx --part N]\n"

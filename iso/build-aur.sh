@@ -33,7 +33,9 @@ if [[ -n ${PKGS_ONLY:-} ]]; then read -ra PKGS <<< "$PKGS_ONLY"; fi
 # sudo, no access to /root), exactly as makechrootpkg -U does it; the chroot build then skips the repeated check.
 # not under /root: `builder` must be able to read the chroot's makepkg.conf (and /root stays closed to it)
 CHROOT=${AUR_CHROOT:-/var/lib/tapkich-os-chroot}
-pacman -S --noconfirm --needed base-devel git devtools >/dev/null
+# Host packages come from iso/setup-build-host.sh only: the build itself never runs pacman on this host (a host
+# transaction can rebuild this computer's initramfs).
+pacman -T base-devel git devtools >/dev/null || { echo "missing build tools: run iso/setup-build-host.sh first"; exit 1; }
 id builder >/dev/null 2>&1 || useradd -m builder
 rm -f /etc/sudoers.d/tapkich-builder      # older builds gave `builder` a root-equivalent pacman rule: gone for good
 if [[ ! -d $CHROOT/root ]]; then

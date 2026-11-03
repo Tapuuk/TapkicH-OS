@@ -8,83 +8,29 @@ How it works (decided 2026-10-19):
     (`limine enroll-config`), and every file in limine.conf carries its own hash (`path#hash`). So a changed kernel,
     initramfs or config is refused. The kernel is also signed with our key (useful if it is ever started directly).
   - Windows is chainloaded through the firmware (protocol efi), which checks Microsoft's signature itself.
-  - Updates stay signed: a pacman hook runs `tapkich secureboot refresh` after every transaction (after sbctl's own
-    hook). It does nothing until Secure Boot was set up, and only rewrites what changed.
+  - Updates stay signed: tapkich-boot-update (bootupdate.py) redoes the hashes, the enrolled config hash and the
+    signatures after every pacman transaction, every mkinitcpio run and kernel-install, and at shutdown.
 Keys can only be enrolled while the firmware is in Setup Mode; firmware never allows that silently from the OS.
 """
 from __future__ import annotations
 
-import hashlib
 import os
-import re
 import shutil
 import subprocess
 import sys
 
+from . import bootupdate
+
 STATE_FILE = "/etc/tapkich-os/secureboot.conf"
 BOOT = "/boot"
-LIMINE_SRC = "/usr/share/limine/BOOTX64.EFI"
-LIMINE_EFIS = ["EFI/limine/limine_x64.efi", "EFI/BOOT/BOOTX64.EFI"]          # relative to /boot (our ESP)
-LIMINE_CONFS = ["EFI/limine/limine.conf", "EFI/BOOT/limine.conf"]
-KERNELS = ["vmlinuz-linux-zen"]
-HOOK_NAME = "zzzz-tapkich-secureboot.hook"                 # sorts after sbctl's zz-sbctl.hook and mkinitcpio's 90-*
-PACMAN_HOOK = """[Trigger]
-Operation = Install
-Operation = Upgrade
-Operation = Remove
-Type = Package
-Target = *
-
-[Action]
-Description = Keeping the TapkicH-OS boot files signed for Secure Boot (does nothing if it is not set up)...
-When = PostTransaction
-Exec = /usr/bin/tapkich secureboot refresh --hook
-"""
-
-# Limine config keys whose value is a file Limine loads and must be hash-checked under Secure Boot.
-HASHED_KEYS = ("path", "module_path", "kernel_path", "dtb_path", "wallpaper", "term_font")
-_FILE_LINE = re.compile(r"^(\s*)(" + "|".join(HASHED_KEYS) + r")(\s*:\s*)(boot\(\):)(/[^#\s]+)(#[0-9a-fA-F]*)?\s*$")
-
-
-def blake2b_file(path: str) -> str:
-    h = hashlib.blake2b()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def blake2b_text(text: str) -> str:
-    return hashlib.blake2b(text.encode()).hexdigest()
-
-
-def with_hashes(conf: str, hash_of) -> str:
-    """limine.conf with a fresh `#<blake2b>` on every file on our ESP (`boot():/...`). `hash_of(relpath)` returns the
-    hex hash, or None when the file is missing (the line is then left without a hash and Limine will refuse it; the
-    caller reports it). EFI chainload entries (`guid(...)` paths, Windows) are left alone: the firmware checks those."""
-    out = []
-    for line in conf.splitlines():
-        m = _FILE_LINE.match(line)
-        if m:
-            indent, key, sep, dev, rel, _old = m.groups()
-            h = hash_of(rel.lstrip("/"))
-            line = f"{indent}{key}{sep}{dev}{rel}" + (f"#{h}" if h else "")
-        out.append(line)
-    return "\n".join(out) + ("\n" if conf.endswith("\n") else "")
-
-
-def without_hashes(conf: str) -> str:
-    return with_hashes(conf, lambda rel: None)
+LIMINE_CONFS = bootupdate.LIMINE_CONFS                     # relative to /boot (our ESP)
+LIMINE_EFIS = bootupdate.LIMINE_EFIS
+with_hashes, without_hashes, blake2b_file = bootupdate.with_hashes, bootupdate.without_hashes, bootupdate.blake2b_file
 
 
 def missing_hashes(conf: str) -> list:
     """Files in the config that have no hash (Limine would refuse to boot them under Secure Boot)."""
-    out = []
-    for line in conf.splitlines():
-        m = _FILE_LINE.match(line)
-        if m and not (m.group(6) or "").lstrip("#") and m.group(2) not in ("wallpaper", "term_font"):
-            out.append(m.group(5))
-    return out
+    return ["/" + rel for key, rel, h in bootupdate.file_lines(conf) if not h and key not in ("wallpaper", "term_font")]
 
 
 def read_state_file(path: str = STATE_FILE) -> dict:
@@ -110,98 +56,15 @@ def _run(cmd: list, check: bool = True, **kw) -> subprocess.CompletedProcess:
 
 
 def sbctl_has_keys() -> bool:
-    return any(os.path.isdir(d) and os.listdir(d) for d in ("/var/lib/sbctl/keys", "/usr/share/secureboot/keys"))
+    return bootupdate.has_keys("/")
 
 
 def refresh(boot: str = BOOT, state_path: str = STATE_FILE, force: bool = False, log=print) -> bool:
-    """Sign the kernel, hash every boot file into limine.conf, enroll the config hash into Limine and sign Limine.
-    Only does work when something changed (or force). Returns True when everything is signed."""
-    st = read_state_file(state_path)
-    kernels = [k for k in KERNELS if os.path.isfile(os.path.join(boot, k))]
-    for k in kernels:                                  # signing changes the file: hash it afterwards
-        if st.get(f"signed_{k}") != blake2b_file(os.path.join(boot, k)) or force:
-            _run(["sbctl", "sign", "-s", os.path.join(boot, k)])
-            st[f"signed_{k}"] = blake2b_file(os.path.join(boot, k))
-            log(f"  signed {k}")
-    confs = [c for c in LIMINE_CONFS if os.path.isfile(os.path.join(boot, c))]
-    if not confs:
-        raise RuntimeError(f"no limine.conf found on {boot}")
-    with open(os.path.join(boot, confs[0])) as f:
-        conf = f.read()
-    new = with_hashes(conf, lambda rel: blake2b_file(os.path.join(boot, rel)) if os.path.isfile(os.path.join(boot, rel)) else None)
-    missing = missing_hashes(new)
-    if missing:
-        raise RuntimeError("these boot files are missing, Limine would refuse to start: " + ", ".join(missing))
-    conf_hash = blake2b_text(new)
-    src_hash = blake2b_file(LIMINE_SRC) if os.path.isfile(LIMINE_SRC) else ""
-    # A Limine reinstall copies the unsigned binary over both ESP files without changing any hash above, so the files
-    # are also compared with what was recorded right after signing them (no record yet: sign once).
-    efis_ok = all(os.path.isfile(os.path.join(boot, e)) and st.get(f"signed_{e}") == blake2b_file(os.path.join(boot, e))
-                  for e in LIMINE_EFIS)
-    changed = force or not efis_ok or conf_hash != st.get("config_hash") or src_hash != st.get("limine_source_hash")
-    if changed:
-        _install_limine(boot, new, conf_hash, st, log)
-        st.update(config_hash=conf_hash, limine_source_hash=src_hash)
-        log("  boot menu config hashed and enrolled; Limine signed")
-    st["enrolled"] = st.get("enrolled", "no")
-    os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    tmp = state_path + ".new"
-    with open(tmp, "w") as f:
-        f.write(render_state_file(st))
-    os.replace(tmp, state_path)
+    """Hash, enroll and sign everything Limine starts: tapkich-boot-update's job (bootupdate.update), kept under this
+    name for `tapkich secureboot setup` and `refresh`. `boot` is <root>/boot. Raises RuntimeError on failure."""
+    root = os.path.dirname(boot.rstrip("/")) or "/"
+    bootupdate.update(bootupdate.Machine(root, log=log, sign=None if root == "/" else False), force=force)
     return True
-
-
-SIGN_MARGIN = 64 * 1024            # signing adds a signature to the binary; room for it per file
-
-
-def _install_limine(boot: str, conf: str, conf_hash: str, st: dict, log=print) -> None:
-    """Replace both Limine copies and both configs without ever leaving a half-written file.
-    Everything is first built as `<file>.new` beside its target (copy, enroll the config hash, sign, check). Only when
-    all of them are ready are they moved into place, one directory at a time (config, then its Limine binary), so at
-    most one of the two boot paths is inconsistent for a moment and the other one stays complete. On any error the
-    new files are deleted and the old ones are untouched."""
-    pairs = list(zip(LIMINE_CONFS, LIMINE_EFIS))
-    targets = [os.path.join(boot, x) for pair in pairs for x in pair]
-    staged = [t + ".new" for t in targets]
-    src_size = os.path.getsize(LIMINE_SRC)                    # missing source: OSError, nothing written yet
-    need = len(LIMINE_EFIS) * (src_size + SIGN_MARGIN) + len(LIMINE_CONFS) * len(conf.encode())
-    free = shutil.disk_usage(boot).free
-    if free < need:
-        raise RuntimeError(f"not enough free space on the boot partition: {need // 1024} KiB needed, "
-                           f"{free // 1024} KiB free. Nothing was changed.")
-    try:
-        for path in staged:                                   # leftovers of an earlier interrupted run
-            if os.path.lexists(path):
-                os.remove(path)
-        for conf_rel, efi_rel in pairs:
-            conf_new = os.path.join(boot, conf_rel) + ".new"
-            efi_new = os.path.join(boot, efi_rel) + ".new"
-            os.makedirs(os.path.dirname(conf_new), exist_ok=True)
-            os.makedirs(os.path.dirname(efi_new), exist_ok=True)
-            with open(conf_new, "w") as f:
-                f.write(conf)
-                f.flush()
-                os.fsync(f.fileno())
-            shutil.copyfile(LIMINE_SRC, efi_new)              # a clean binary each time (enroll-config writes into it)
-            _run(["limine", "enroll-config", "--quiet", efi_new, conf_hash])
-            _run(["sbctl", "sign", efi_new])
-            if not os.path.isfile(efi_new) or os.path.getsize(efi_new) < src_size:
-                raise RuntimeError(f"the new {efi_rel} is incomplete; the old files were kept")
-        hashes = {}
-        for conf_rel, efi_rel in pairs:
-            os.replace(os.path.join(boot, conf_rel) + ".new", os.path.join(boot, conf_rel))
-            os.replace(os.path.join(boot, efi_rel) + ".new", os.path.join(boot, efi_rel))
-            _run(["sbctl", "sign", "-s", os.path.join(boot, efi_rel)], check=False)    # remember it for sbctl's own hook
-            hashes[efi_rel] = blake2b_file(os.path.join(boot, efi_rel))
-        for efi_rel, h in hashes.items():
-            st[f"signed_{efi_rel}"] = h
-    finally:
-        for path in staged:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
 
 
 def _ask(question: str, default: bool = False) -> bool:
@@ -354,26 +217,8 @@ def main(args: list) -> int:
     if args[:1] not in (["setup"], ["refresh"], []) or any(a not in allowed for a in args[1:]):
         print(USAGE, file=sys.stderr)                         # an unknown option must never start the real setup
         return 2
-    if args[:1] == ["refresh"]:
-        hook = "--hook" in args
-        if not os.path.isfile(STATE_FILE):
-            if not hook:
-                print("Secure Boot is not set up, so there is nothing to sign (`sudo tapkich secureboot setup`).")
-            return 0                                          # not set up: nothing to keep signed
-        if os.geteuid() != 0:
-            print("tapkich secureboot refresh must run as root")
-            return 1
-        try:
-            refresh(force="--force" in args, log=(lambda *_: None) if hook else print)
-        except (RuntimeError, OSError) as e:
-            print(f"TapkicH-OS Secure Boot: could not re-sign the boot files: {e}\n"
-                  "The old boot files were kept. Do not restart with Secure Boot on before this is fixed "
-                  "(run `sudo tapkich secureboot refresh`).")
-            return 1
-        except KeyboardInterrupt:
-            print("Stopped. The old boot files were kept.")
-            return 130
-        return 0
+    if args[:1] == ["refresh"]:                           # the same as tapkich-boot-update (older pacman hooks call it)
+        return bootupdate.main(["--hook"] * ("--hook" in args) + ["--force"] * ("--force" in args))
     try:
         return setup(assume_yes="--yes" in args, from_installer="--from-installer" in args)
     except KeyboardInterrupt:
