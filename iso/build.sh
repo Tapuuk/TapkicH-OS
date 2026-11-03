@@ -37,10 +37,17 @@ boot_state() { if mountpoint -q /boot; then find /boot -xdev -printf '%P %s %T@\
 BOOT_BEFORE=$(boot_state)
 boot_guard() {
   local rc=$?
+  trap - EXIT
   if [[ $(boot_state) != "$BOOT_BEFORE" ]]; then
-    echo "!!! /boot on this computer CHANGED during the ISO build (it must not). Check before restarting:"
-    echo "!!!   sudo tapkich-boot-update --check     (and without --check to put the hashes back in step)"
-    rc=1
+    # Something else on this computer may change /boot meanwhile (tapkich-boot-good.timer, 3 minutes after a start):
+    # what matters is that the boot menu is still in step. The real command, not the stub on PATH.
+    if [[ -x /usr/bin/tapkich-boot-update ]] && /usr/bin/tapkich-boot-update --check >/dev/null 2>&1; then
+      echo "note: /boot changed during the build, but not by it (no boot tool ran from it), and the boot menu is in step"
+    else
+      echo "!!! /boot on this computer CHANGED during the ISO build and the boot menu may be out of step. Before restarting:"
+      echo "!!!   sudo tapkich-boot-update --check     (and without --check to put the hashes back in step)"
+      rc=1
+    fi
   fi
   exit $rc
 }

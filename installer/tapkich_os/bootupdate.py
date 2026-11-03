@@ -105,6 +105,7 @@ exit 0
 KERNEL_INSTALL_PATH = "/usr/lib/kernel/install.d/95-tapkich-boot-update.install"
 
 # At every shutdown: whatever changed the boot files since the start (a tool we did not foresee) is caught here.
+# Both units are static (no [Install]): the package's .wants links switch them on, `systemctl disable` cannot.
 SHUTDOWN_UNIT = """[Unit]
 Description=Check the TapkicH-OS boot menu hashes and signatures before shutting down
 RequiresMountsFor=/boot
@@ -116,9 +117,6 @@ RemainAfterExit=yes
 ExecStart=/bin/true
 ExecStop=/usr/bin/tapkich-boot-update --hook
 TimeoutStopSec=120
-
-[Install]
-WantedBy=multi-user.target
 """
 # A few minutes into every start: the kernel and initramfs just started fine, so they become the "last known good"
 # copy; also picks up a changed Secure Boot setting (VERIFY_HASHES=auto).
@@ -135,9 +133,6 @@ Description=Mark this start's kernel as the TapkicH-OS "last known good" boot en
 
 [Timer]
 OnBootSec=3min
-
-[Install]
-WantedBy=timers.target
 """
 
 COMMAND = """#!/bin/sh
