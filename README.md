@@ -21,7 +21,7 @@ Gaming Mode works just like SteamOS on the Steam Deck. Steam's console interface
 | Gaming | Install it yourself | Steam, Lutris, Proton-GE and a Gaming Mode like SteamOS |
 | Apps | pacman and the AUR | Bazaar, a simple app store for Flathub apps, plus `tapkich install` for apps like Chrome or 1Password |
 | AUR helper | Install it yourself | `paru` |
-| Updates | `pacman -Syu` | `tapkich update` runs pacman, paru and Flatpak in one go |
+| Updates | `pacman -Syu` | `tapkich update` runs pacman, paru, Caelestia's own updater and Flatpak in one go |
 | Secure Boot | Set it up yourself | `tapkich secureboot setup` keeps Microsoft's keys, so Windows still starts |
 
 > [!NOTE]
@@ -46,7 +46,7 @@ Everything after the install goes through one command, `tapkich`.
 
 | Command | What it does |
 |---|---|
-| `tapkich update` | Updates TapkicH-OS, system packages (pacman), AUR packages (paru) and Flatpaks |
+| `tapkich update` | Updates TapkicH-OS, system packages (pacman), AUR packages (paru), Caelestia's dotfiles (`caelestia update`: files you edited are kept, the new version lands beside them as `.new`) and Flatpaks |
 | `tapkich update --yes` | The same without questions |
 | `tapkich doctor` | Checks the graphics driver, Vulkan, Gaming Mode, Secure Boot, Flathub and disk space, and says what to run |
 | `tapkich gamemode` | Switches to Gaming Mode from the desktop (also the gamepad button in the power menu) |

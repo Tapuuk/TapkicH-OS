@@ -6,7 +6,12 @@
   3. The shell's Qt-linked AUR packages (quickshell-git, caelestia-shell, ...): rebuilt when pacman just moved Qt to
      another version than they were built against (Quickshell uses Qt's private API and crashes otherwise).
   4. AUR packages: paru -Sua (only what is not in a repository).
-  5. Flatpak apps (Bazaar / Flathub).
+  5. Caelestia's dotfiles (its Hyprland, fish, foot, ... configs): `caelestia update`, Caelestia's own updater. They are
+     copied once at install time, so without this an install keeps the dotfiles of its install day (2026-11: a
+     Hyprland update deprecated `group.lock_active()`, which upstream had already replaced). Files the user edited
+     are kept; Caelestia writes the new version beside them as `<file>.new`. Our override files (hypr-vars.lua,
+     hypr-user.lua, shell.json) are not Caelestia's files and stay as they are.
+  6. Flatpak apps (Bazaar / Flathub).
 
 When the release files cannot be downloaded (GitHub is down, or the files are missing for a moment), step 1 says so
 calmly and the rest still runs: if [tapkich] is already in pacman.conf, pacman runs with a temporary configuration
@@ -233,6 +238,27 @@ def qt_step(yes: bool, run=_run) -> Step:
     return s
 
 
+def dots_command(yes: bool) -> list:
+    return ["caelestia", "update", "--aur-helper", "paru"] + (["--noconfirm"] if yes else [])
+
+
+def dots_step(yes: bool, run=_run, home: str | None = None) -> Step:
+    """Caelestia's dotfiles, after the packages (its own `paru -Syu` first then has nothing left to do)."""
+    s = Step("Caelestia dotfiles")
+    home = home or os.path.expanduser("~")
+    if os.geteuid() == 0:
+        s.note = "Caelestia's dotfiles are per user (run `tapkich update` without sudo)"
+    elif not shutil.which("caelestia"):
+        s.note = "the caelestia command is not installed"
+    elif not os.path.isfile(os.path.join(home, ".local/state/caelestia/dots-state.json")):
+        s.note = "Caelestia's dotfiles were never installed for this user (`caelestia install`)"
+    else:
+        s.result = "ok" if run(dots_command(yes)) == 0 else "failed"
+        return s
+    _say("  " + s.note)
+    return s
+
+
 def channel_step(conf: dict, pacman_conf_path: str = PACMAN_CONF, probe_fn=None, fingerprint=key_fingerprint,
                  run=_quiet, write=None) -> Step:
     """Make [tapkich] part of pacman's repositories when it is published and signed with a key pacman knows. When it
@@ -335,7 +361,8 @@ def main(argv=None) -> int:
     yes = bool(args)                                  # unattended: no questions from pacman or paru
     conf = read_conf()
     steps = []
-    _say("Updating everything: TapkicH-OS, the system, AUR packages and Flatpak apps.\nYou may be asked for your password.")
+    _say("Updating everything: TapkicH-OS, the system, AUR packages, Caelestia's dotfiles and Flatpak apps.\n"
+         "You may be asked for your password.")
 
     _head("TapkicH-OS")
     ch = channel_step(conf)
@@ -381,6 +408,9 @@ def main(argv=None) -> int:
         s.note = "paru is not installed"
         _say("  paru is not installed: skipped")
     steps.append(s)
+
+    _head("Caelestia dotfiles")
+    steps.append(dots_step(yes))
 
     _head("Flatpak apps")
     s = Step("Flatpak apps")

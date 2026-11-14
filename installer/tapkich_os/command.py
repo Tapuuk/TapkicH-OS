@@ -15,7 +15,8 @@ HELP_WIDTH = 78
 HELP_COLUMN = 32                                      # where the descriptions start
 
 HELP_COMMANDS = [
-    ("tapkich update [--yes]", "Update everything: TapkicH-OS, system packages (pacman), AUR packages (paru), Flatpak"),
+    ("tapkich update [--yes]", "Update everything: TapkicH-OS, system packages (pacman), AUR packages (paru), "
+                               "Caelestia's dotfiles, Flatpak"),
     ("tapkich doctor", "Check the graphics driver, Vulkan, Gaming Mode, Secure Boot, Flathub and disk space"),
     ("tapkich gamemode", "Switch to Gaming Mode: Steam's console-style session, like SteamOS (also the gamepad "
                          "button in Caelestia's power menu). Steam's \"Switch to Desktop\" comes back."),
