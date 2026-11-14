@@ -2,7 +2,9 @@ boot_update() {
   # the boot menu: regenerate the path hashes, enroll the config hash and re-sign, then check (this also repairs a
   # menu that older versions left out of step). Nothing to do before the installer has put Limine there.
   [ -d /boot/EFI/limine ] || return 0
-  /usr/bin/tapkich-boot-update --force --mark-good ||
+  # --hook: when the same transaction upgrades the kernel its images are missing right now; the pacman hook at the
+  # end of the transaction updates the menu then
+  /usr/bin/tapkich-boot-update --hook --force --mark-good ||
     echo "tapkich-os: the boot menu could not be updated (see above). Run 'sudo tapkich-boot-update' before restarting."
 }
 

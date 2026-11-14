@@ -157,6 +157,13 @@ class BootUpdateError(RuntimeError):
     pass
 
 
+class FilesMissing(BootUpdateError):
+    """A kernel or initramfs the menu names is not there. During a kernel upgrade this is normal for a moment: Arch's
+    mkinitcpio hook removes the old images before the upgrade and builds the new ones at its end (one preset after
+    the other), so runs in between (the package's scriptlet, the post hook of the first image) find files missing.
+    Hook runs leave it to the run after the rebuild (the last post hook, the pacman hook, the shutdown check)."""
+
+
 class NotSetUp(BootUpdateError):
     """No TapkicH-OS boot menu here (an installer chroot before Limine, a /boot that is not the ESP, ...)."""
 
@@ -699,7 +706,8 @@ def update(m: Machine, *, force: bool = False, mark_good: bool = False) -> bool:
     missing = [rel for key, rel, h in file_lines(text) if key not in ("wallpaper", "term_font")
                and not os.path.isfile(m.esp(rel))]
     if missing:
-        raise BootUpdateError("these boot files are missing, so the menu would not start them: " + ", ".join(missing))
+        raise FilesMissing("these boot files are missing, so the menu would not start them: "
+                           + ", ".join(dict.fromkeys(missing)))
     want_hash = blake2b_text(text) if verify else UNENROLLED
     src_efi = m.at(LIMINE_SRC)
     if not os.path.isfile(src_efi):
@@ -987,6 +995,15 @@ def main(args: list) -> int:
                 print(f"tapkich-boot-update: {e}", file=sys.stderr)
             return 0
         print(f"tapkich-boot-update: {e}", file=sys.stderr)
+        return 1
+    except FilesMissing as e:
+        if hook:                                    # mid-rebuild: the run after the rebuild does it (nothing changed)
+            print("tapkich-boot-update: boot files are being rebuilt; the boot menu is updated once they are all "
+                  "there", file=sys.stderr)
+            return 0
+        print(f"tapkich-boot-update: FAILED: {e}\nNothing was changed. Rebuild them (sudo mkinitcpio -P) or remove "
+              "their entries from /etc/tapkich-os/limine.conf, then run `sudo tapkich-boot-update` again.",
+              file=sys.stderr)
         return 1
     except (BootUpdateError, OSError) as e:
         print(f"tapkich-boot-update: FAILED: {e}\nThe old boot files were kept. Fix the cause and run "
